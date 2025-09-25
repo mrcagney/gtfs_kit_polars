@@ -21,9 +21,21 @@ Authors
 - Alex Raichev (2019-09), maintainer
 
 
-Documentation
-=============
+Progress
+=========
+Progress porting the Pandas original to Polars.
 
+[] calendar.py
+[] cleaners.py
+[] constants.py
+[] feed.py
+[] helpers.py
+[] miscellany.py
+[] routes.py
+[] shapes.py
+[] stop_times.py
+[] stops.py
+[] trips.py
 
 Notes
 =====
