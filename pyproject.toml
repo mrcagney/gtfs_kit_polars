@@ -3,7 +3,7 @@ name = "gtfs-kit-next"
 version = "1.0.0"
 description = "A Python library for analyzing GTFS feeds."
 readme = "README.rst"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "MIT"
 authors = [
     { name = "Alexander Raichev", email = "araichev@mrcagney.com" },
