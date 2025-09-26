@@ -12,6 +12,7 @@ from bisect import bisect_left, bisect_right
 from functools import cmp_to_key
 from typing import Callable, Literal
 
+import utm
 import json2html as j2h
 import polars as pl
 import numpy as np
@@ -48,6 +49,10 @@ def is_empty(f: pl.DataFrame|pl.LazyDataFrame) -> bool:
         return f.is_empty()
     except AttributeError:
         return f.limit(1).collect().is_empty()
+
+def get_utm_srid(lon, lat):
+    _, _, znum, zlet = utm.from_latlon(lat, lon)
+    return (32600 if zlet >= "N" else 32700) + int(znum)
 
 def datestr_to_date(x: str | None, format_str: str = "%Y%m%d") -> dt.date | None:
     """

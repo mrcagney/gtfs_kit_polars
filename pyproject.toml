@@ -18,6 +18,7 @@ dependencies = [
     "pandas>=2.2.2",
     "polars>=1.33.1",
     "polars-st>=0.3.0",
+    "utm>=0.8.1",
 ]
 
 [project.urls]

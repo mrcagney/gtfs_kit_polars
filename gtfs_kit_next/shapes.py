@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Iterable, TYPE_CHECKING
 import json
 
+import polars as pl
+import polars_st as st
 import geopandas as gpd
 import pandas as pd
 import shapely
@@ -34,32 +36,41 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
         raise ValueError("This function requires the feed to have a shapes.txt file")
 
     feed = feed.copy()
+    s = feed.shapes
 
-    g = (
-        feed.shapes.assign(
-            geometry=lambda x: gpd.points_from_xy(x["shape_pt_lon"], x["shape_pt_lat"])
+    lon, lat =  s.limit(1).select("shape_pt_lon", "shape_pt_lat").collect().row(0)
+    utm_srid = hp.get_utm_srid(lon, lat)
+
+    s = (
+        # Build point geometries in WGS84 then convert to UTM
+        s.with_columns(
+            geometry=st.point(pl.concat_arr("shape_pt_lon", "shape_pt_lat"))
+            .st.set_srid(4326)
+            .st.to_srid(utm_srid)
         )
-        .pipe(gpd.GeoDataFrame, crs=cs.WGS84)
-        .pipe(lambda x: x.to_crs(x.estimate_utm_crs()))
-        .sort_values(["shape_id", "shape_pt_sequence"])
+        .sort(["shape_id", "shape_pt_sequence"])
+        # Get successive point distances in meters
+        .with_columns(
+            prev=pl.col("geometry").shift(1).over("shape_id"),
+        )
+        .with_columns(
+            seg_m=(
+                pl.when(pl.col("prev").is_null())
+                .then(pl.lit(0.0))
+                .otherwise(pl.col("geometry").st.distance(pl.col("prev")))
+            )
+        )
+        .with_columns(
+            cum_m=pl.col("seg_m").cum_sum().over("shape_id")
+        )
+        # Convert distances to feed units
+        .with_columns(
+            shape_dist_traveled=pl.col("cum_m").map_elements(lambda x: hp.get_convert_dist("m", feed.dist_units)(x)),
+        )
+        # Clean up
+        .drop("geometry", "prev", "seg_m", "cum_m")
     )
-    # Compute cumulative between successive points within shape
-    g["prev_geom"] = g.groupby("shape_id")["geometry"].shift(1)
-    g["dist_m"] = g.apply(
-        lambda row: (
-            row["geometry"].distance(row["prev_geom"])
-            if pd.notnull(row["prev_geom"])
-            else 0
-        ),
-        axis=1,
-    )
-    g["shape_dist_traveled"] = (
-        g.groupby("shape_id")["dist_m"]
-        .cumsum()
-        .map(hp.get_convert_dist("m", feed.dist_units))
-    )
-
-    feed.shapes = g.drop(["geometry", "prev_geom", "dist_m"], axis=1)
+    feed.shapes = s
     return feed
 
 
