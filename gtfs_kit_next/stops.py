@@ -203,7 +203,7 @@ def compute_stop_stats_0(
     null_stats = pd.DataFrame(data=[], columns=final_cols)
 
     # Handle defunct case
-    if trips_subset.empty:
+    if trips_subset.is_empty():
         return null_stats
 
     f = stop_times_subset.merge(trips_subset)
@@ -247,7 +247,7 @@ def compute_stop_stats_0(
         f = f.loc[lambda x: x.direction_id.notnull()].assign(
             direction_id=lambda x: x.direction_id.astype(int)
         )
-        if f.empty:
+        if f.is_empty():
             raise ValueError("At least one trip direction ID value must be non-NaN.")
         g = f.groupby(["stop_id", "direction_id"])
     else:
@@ -415,7 +415,7 @@ def compute_stop_time_series_0(
     null_stats = pd.DataFrame([], columns=final_cols)
 
     # Handle defunct case
-    if trips_subset.empty:
+    if trips_subset.is_empty():
         return null_stats
 
     f = pd.merge(stop_times_subset, trips_subset)
@@ -426,7 +426,7 @@ def compute_stop_time_series_0(
         f = f.loc[lambda x: x.direction_id.notnull()].assign(
             direction_id=lambda x: x.direction_id.astype(int)
         )
-        if f.empty:
+        if f.is_empty():
             raise ValueError("At least one trip direction ID value must be non-NaN.")
 
         # Alter stop IDs to encode trip direction:

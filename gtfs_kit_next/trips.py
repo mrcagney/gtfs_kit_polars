@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Iterable
 import folium as fl
 import folium.plugins as fp
 import numpy as np
+import polars as pl
 import pandas as pd
 import shapely.geometry as sg
 import shapely.ops as so
@@ -23,45 +24,48 @@ from . import helpers as hp
 if TYPE_CHECKING:
     from .feed import Feed
 
-
 def get_active_services(feed: "Feed", date: str) -> list[str]:
     """
     Given a Feed and a date string in YYYYMMDD format,
-    return the list of service IDs that are active on the date.
+    return the service IDs that are active on the date.
     """
-    active_services = set()
-    removed_services = set()
+    # helper: empty one-col LazyFrame
+    def _empty():
+        return pl.LazyFrame(schema={"service_id": pl.Utf8})
 
+    # Weekday column name (e.g., "monday")
+    weekday_str = dt.datetime.strptime(date, "%Y%m%d").strftime("%A").lower()
+
+    # calendar: services scheduled on this date (start<=date<=end and weekday==1)
+    active_1 = _empty()
     if feed.calendar is not None:
-        # Convert date to weekday string (e.g., "monday")
-        weekday_str = dt.datetime.strptime(date, "%Y%m%d").strftime("%A").lower()
-        # Filter `calendar` to services active on date
-        active_services |= set(
-            feed.calendar.loc[
-                lambda x: (x["start_date"] <= date)
-                & (x["end_date"] >= date)
-                & (x[weekday_str] == 1),
-                "service_id",
-            ]
-        )
+        active_1 = feed.calendar.filter(
+            (pl.col("start_date") <= date)
+            & (pl.col("end_date") >= date)
+            & (pl.col(weekday_str) == 1)
+        ).select("service_id")
 
+    # calendar_dates: services explicitly added on date (exception_type==1)
+    active_2 = _empty()
+    # calendar_dates: services explicitly removed on date (exception_type==2)
+    removed = _empty()
     if feed.calendar_dates is not None:
-        # Filter `calendar_dates` to services added on date
-        active_services |= set(
-            feed.calendar_dates.loc[
-                lambda x: (x["date"] == date) & (x["exception_type"] == 1),
-                "service_id",
-            ]
-        )
-        # Filter `calendar_dates` to services removed on date
-        removed_services |= set(
-            feed.calendar_dates.loc[
-                lambda x: (x["date"] == date) & (x["exception_type"] == 2),
-                "service_id",
-            ]
-        )
+        active_2 = feed.calendar_dates.filter(
+            (pl.col("date") == date) & (pl.col("exception_type") == 1)
+        ).select("service_id")
+        removed = feed.calendar_dates.filter(
+            (pl.col("date") == date) & (pl.col("exception_type") == 2)
+        ).select("service_id")
 
-    return list(active_services - removed_services)
+    # Union active parts, then set-difference removed
+    return (
+        pl.concat([active_1, active_2])
+        .unique()
+        .join(removed, on="service_id", how="anti")
+        .collect()
+        ["service_id"]
+        .to_list()
+    )
 
 
 def get_trips(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import polars as pl
 import numpy as np
 import pandas as pd
 
@@ -17,14 +18,12 @@ if TYPE_CHECKING:
     from .feed import Feed
 
 
-def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+def clean_column_names(f: pl.DataFrame|pl.LazyFrame) -> pl.DataFrame|pl.LazyFrame:
     """
-    Strip the whitespace from all column names in the given DataFrame
+    Strip the whitespace from all column names in the given table
     and return the result.
     """
-    f = df.copy()
-    f.columns = [col.strip() for col in f.columns]
-    return f
+    return f.rename({c: c.strip() for c in f.collect_schema().names()})
 
 
 def clean_ids(feed: "Feed") -> "Feed":

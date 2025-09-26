@@ -390,7 +390,7 @@ def compute_route_stats_0(
     null_stats = pd.DataFrame(data=[], columns=final_cols)
 
     # Handle defunct case
-    if trip_stats.empty:
+    if trip_stats.is_empty():
         return null_stats
 
     # Remove defunct trips
@@ -497,7 +497,7 @@ def compute_route_stats_0(
         f = f.loc[lambda x: x.direction_id.notnull()].assign(
             direction_id=lambda x: x.direction_id.astype(int)
         )
-        if f.empty:
+        if f.is_empty():
             raise ValueError(
                 "At least one trip stats direction ID value must be non-NaN."
             )
@@ -739,7 +739,7 @@ def compute_route_time_series_0(
     null_stats = pd.DataFrame([], columns=final_cols)
 
     # Handle defunct case
-    if trip_stats.empty:
+    if trip_stats.is_empty():
         return null_stats
 
     tss = trip_stats.copy()
@@ -747,7 +747,7 @@ def compute_route_time_series_0(
         tss = tss.loc[lambda x: x.direction_id.notnull()].assign(
             direction_id=lambda x: x.direction_id.astype(int)
         )
-        if tss.empty:
+        if tss.is_empty():
             raise ValueError(
                 "At least one trip stats direction ID value must be non-NaN."
             )

@@ -25,17 +25,17 @@ Progress
 =========
 Progress porting the Pandas original to Polars.
 
-[] calendar.py
+[x] calendar.py
 [] cleaners.py
-[] constants.py
-[] feed.py
-[] helpers.py
+[x] constants.py
+[x] feed.py
+[] helpers.py: in progress
 [] miscellany.py
 [] routes.py
 [] shapes.py
 [] stop_times.py
 [] stops.py
-[] trips.py
+[] trips.py: in progress
 
 Notes
 =====

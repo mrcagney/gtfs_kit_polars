@@ -290,7 +290,7 @@ def shapes_to_geojson(feed: "Feed", shape_ids: Iterable[str] | None = None) -> d
     g = get_shapes(feed, as_gdf=True)
     if shape_ids is not None:
         g = g.loc[lambda x: x["shape_id"].isin(shape_ids)]
-    if g is None or g.empty:
+    if g is None or g.is_empty():
         result = {
             "type": "FeatureCollection",
             "features": [],

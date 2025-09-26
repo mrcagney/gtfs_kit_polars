@@ -13,12 +13,41 @@ from functools import cmp_to_key
 from typing import Callable, Literal
 
 import json2html as j2h
+import polars as pl
 import numpy as np
 import pandas as pd
 import shapely.geometry as sg
 
 from . import constants as cs
 
+
+def are_equal(f: pl.DataFrame|pl.LazyFrame, g: pl.DataFrame|pl.LazyFrame) -> bool:
+    """
+    Return True if and only if the tables are equal after sorting column names
+    and sorting rows by all columns.
+    Nulls are treated as equal.
+    """
+    if f is g:
+        return True
+
+    F = f.collect() if isinstance(f, pl.LazyFrame) else f
+    G = g.collect() if isinstance(g, pl.LazyFrame) else g
+
+    cols_f = sorted(F.columns)
+    cols_g = sorted(G.columns)
+    if cols_f != cols_g:
+        return False
+
+    cols = cols_f
+    F = F.select(cols).sort(cols)
+    G = G.select(cols).sort(cols)
+    return F.equals(G, null_equal=True)
+
+def is_empty(f: pl.DataFrame|pl.LazyDataFrame) -> bool:
+    try:
+        return f.is_empty()
+    except AttributeError:
+        return f.limit(1).collect().is_empty()
 
 def datestr_to_date(x: str | None, format_str: str = "%Y%m%d") -> dt.date | None:
     """
@@ -227,20 +256,6 @@ def get_convert_dist(
     return lambda x: d[di][do] * x
 
 
-def almost_equal(f: pd.DataFrame, g: pd.DataFrame) -> bool:
-    """
-    Return ``True`` if and only if the given DataFrames are equal after
-    sorting their columns names, sorting their values, and
-    reseting their indices.
-    """
-    if f.empty or g.empty:
-        return f.equals(g)
-    else:
-        # Put in canonical order
-        F = f.sort_index(axis=1).sort_values(list(f.columns)).reset_index(drop=True)
-        G = g.sort_index(axis=1).sort_values(list(g.columns)).reset_index(drop=True)
-        return F.equals(G)
-
 
 def is_not_null(df: pd.DataFrame, col_name: str) -> bool:
     """
@@ -407,7 +422,7 @@ def downsample(time_series: pd.DataFrame, freq: str) -> pd.DataFrame:
     import pandas.tseries.frequencies as pdf
 
     # Handle defunct cases
-    if time_series.empty:
+    if time_series.is_empty():
         return time_series
 
     f = time_series.assign(datetime=lambda x: pd.to_datetime(x["datetime"]))
@@ -451,7 +466,7 @@ def downsample(time_series: pd.DataFrame, freq: str) -> pd.DataFrame:
         Num trips uses custom rule:
         last(num_trips in bin) + sum(num_trip_ends in all but the last row in the bin)
         """
-        if g.empty:
+        if g.is_empty():
             return np.nan
         return g["num_trips"].iloc[-1] + g["num_trip_ends"].iloc[:-1].sum(min_count=1)
 

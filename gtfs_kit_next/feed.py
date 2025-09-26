@@ -17,15 +17,16 @@ Ignore that extra parameter; it refers to the Feed instance,
 usually called ``self`` and usually hidden automatically by Sphinx.
 """
 
-import pathlib as pl
+from __future__ import annotations
+
+import pathlib as pb
 import shutil
 import tempfile
 import zipfile
 from copy import deepcopy
 
-import pandas as pd
+import polars as pl
 import requests
-from pandas.core.frame import DataFrame
 
 from . import cleaners as cn
 from . import constants as cs
@@ -63,13 +64,12 @@ class Feed(object):
     There are also a few secondary instance attributes that are derived
     from the primary attributes and are automatically updated when the
     primary attributes change.
-    However, for this update to work, you must update the primary
-    attributes like this (good)::
+    For this to work, you must update the primary attributes like this (good)::
 
         feed.trips['route_short_name'] = 'bingo'
         feed.trips = feed.trips
 
-    and **not** like this (bad)::
+    and not like this (bad)::
 
         feed.trips['route_short_name'] = 'bingo'
 
@@ -162,20 +162,20 @@ class Feed(object):
     def __init__(
         self,
         dist_units: str,
-        agency: DataFrame | None = None,
-        stops: DataFrame | None = None,
-        routes: DataFrame | None = None,
-        trips: DataFrame | None = None,
-        stop_times: DataFrame | None = None,
-        calendar: DataFrame | None = None,
-        calendar_dates: DataFrame | None = None,
-        fare_attributes: DataFrame | None = None,
-        fare_rules: DataFrame | None = None,
-        shapes: DataFrame | None = None,
-        frequencies: DataFrame | None = None,
-        transfers: DataFrame | None = None,
-        feed_info: DataFrame | None = None,
-        attributions: DataFrame | None = None,
+        agency: pl.DataFrame | pl.LazyFrame | None = None,
+        stops: pl.DataFrame | pl.LazyFrame | None = None,
+        routes: pl.DataFrame | pl.LazyFrame | None = None,
+        trips: pl.DataFrame | pl.LazyFrame | None = None,
+        stop_times: pl.DataFrame | pl.LazyFrame | None = None,
+        calendar: pl.DataFrame | pl.LazyFrame | None = None,
+        calendar_dates: pl.DataFrame | pl.LazyFrame | None = None,
+        fare_attributes: pl.DataFrame | pl.LazyFrame | None = None,
+        fare_rules: pl.DataFrame | pl.LazyFrame | None = None,
+        shapes: pl.DataFrame | pl.LazyFrame | None = None,
+        frequencies: pl.DataFrame | pl.LazyFrame | None = None,
+        transfers: pl.DataFrame | pl.LazyFrame | None = None,
+        feed_info: pl.DataFrame | pl.LazyFrame | None = None,
+        attributions: pl.DataFrame | pl.LazyFrame | None = None,
     ):
         """
         Assume that every non-None input is a DataFrame,
@@ -191,7 +191,12 @@ class Feed(object):
         # validate some and set some derived attributes
         for prop, val in locals().items():
             if prop in cs.FEED_ATTRS:
-                setattr(self, prop, val)
+                if prop != "dist_units" and val is not None:
+                    # Coerce to lazy frame
+                    setattr(self, prop, val.lazy())
+                else:
+                    setattr(self, prop, val)
+
 
     @property
     def dist_units(self):
@@ -209,42 +214,43 @@ class Feed(object):
         else:
             self._dist_units = val
 
-    def __str__(self):
+    def __str__(self) -> str:
         """
         Print the first five rows of each GTFS table.
         """
         d = {}
         for table in cs.DTYPES:
-            try:
-                d[table] = getattr(self, table).head(5)
-            except Exception:
-                d[table] = None
+            t = getattr(self, table)
+            if t is not None:
+                t = t.limit(5).collect()
+            d[table] = t
         d["dist_units"] = self.dist_units
 
         return "\n".join([f"* {k} --------------------\n\t{v}" for k, v in d.items()])
 
-    def __eq__(self, other):
+    def __eq__(self, other) -> bool:
         """
         Define two feeds be equal if and only if their
         :const:`.constants.FEED_ATTRS` attributes are equal,
         or almost equal in the case of DataFrames
         (but not groupby DataFrames).
         Almost equality is checked via :func:`.helpers.almost_equal`,
-        which   canonically sorts DataFrame rows and columns.
+        which canonically sorts DataFrame rows and columns.
         """
-        # Return False if failures
+        if self is other:
+            return True
+        if not isinstance(other, Feed):
+            return NotImplemented
+
         for key in cs.FEED_ATTRS:
             x = getattr(self, key)
             y = getattr(other, key)
-            # DataFrame case
-            if isinstance(x, pd.DataFrame):
-                if not isinstance(y, pd.DataFrame) or not hp.almost_equal(x, y):
+            if isinstance(x, pl.LazyFrame):
+                if not isinstance(y, pl.LazyFrame) or not hp.are_equal(x, y):
                     return False
-            # Other case
             else:
                 if x != y:
                     return False
-        # No failures
         return True
 
     def copy(self) -> "Feed":
@@ -253,16 +259,15 @@ class Feed(object):
         attributes.
         """
         other = Feed(dist_units=self.dist_units)
-        for key in set(cs.FEED_ATTRS) - set(["dist_units"]):
+        for key in set(cs.FEED_ATTRS) - {"dist_units"}:
             value = getattr(self, key)
-            if isinstance(value, pd.DataFrame):
-                # Pandas copy DataFrame
-                value = value.copy()
+            if isinstance(value, pl.LazyFrame):
+                # LazyFrames are immutable expression plans; shallow copy is fine
+                value = deepcopy(value)
             setattr(other, key, value)
-
         return other
 
-    def to_file(self, path: pl.Path, ndigits: int | None = None) -> None:
+    def to_file(self, path: pb.Path, ndigits: int | None = None) -> None:
         """
         Write this Feed to the given path.
         If the path ends in '.zip', then write the feed as a zip archive.
@@ -274,27 +279,32 @@ class Feed(object):
         By the way, 6 decimal degrees of latitude and longitude is enough to locate
         an individual cat.
         """
-        path = pl.Path(path)
+        path = pb.Path(path)
 
         if path.suffix == ".zip":
             # Write to temporary directory before zipping
             zipped = True
             tmp_dir = tempfile.TemporaryDirectory()
-            new_path = pl.Path(tmp_dir.name)
+            new_path = pb.Path(tmp_dir.name)
         else:
             zipped = False
             if not path.exists():
-                path.mkdir()
+                path.mkdir(parents=True, exist_ok=True)
             new_path = path
 
         for table in cs.DTYPES:
             f = getattr(self, table)
             if f is not None:
                 p = new_path / (table + ".txt")
+
+                # Materialize LazyFrame
+                if isinstance(f, pl.LazyFrame):
+                    f = f.collect()
+
                 if ndigits is not None:
-                    f.to_csv(p, index=False, float_format=f"%.{ndigits}f")
+                    f.write_csv(p, float_precision=ndigits)
                 else:
-                    f.to_csv(p, index=False)
+                    f.write_csv(p)
 
         # Zip directory
         if zipped:
@@ -306,7 +316,7 @@ class Feed(object):
 # -------------------------------------
 # Functions about input and output
 # -------------------------------------
-def list_feed(path: pl.Path) -> DataFrame:
+def list_feed(path: pb.Path) -> pl.DataFrame:
     """
     Given a path (string or Path object) to a GTFS zip file or
     directory, record the file names and file sizes of the contents,
@@ -315,11 +325,10 @@ def list_feed(path: pl.Path) -> DataFrame:
     - ``'file_name'``
     - ``'file_size'``
     """
-    path = pl.Path(path)
+    path = pb.Path(path)
     if not path.exists():
         raise ValueError(f"Path {path} does not exist")
 
-    # Collect rows of DataFrame
     rows = []
     if path.is_file():
         # Zip file
@@ -327,22 +336,17 @@ def list_feed(path: pl.Path) -> DataFrame:
             for x in src.infolist():
                 if x.filename == "./":
                     continue
-                d = {}
-                d["file_name"] = x.filename
-                d["file_size"] = x.file_size
-                rows.append(d)
+                rows.append({"file_name": x.filename, "file_size": x.file_size})
     else:
         # Directory
         for x in path.iterdir():
-            d = {}
-            d["file_name"] = x.name
-            d["file_size"] = x.stat().st_size
-            rows.append(d)
+            if x.is_file():
+                rows.append({"file_name": x.name, "file_size": x.stat().st_size})
 
-    return pd.DataFrame(rows)
+    return pl.DataFrame(rows)
 
 
-def _read_feed_from_path(path: pl.Path, dist_units: str) -> "Feed":
+def _read_feed_from_path(path: pb.Path, dist_units: str) -> "Feed":
     """
     Helper function for :func:`read_feed`.
     Create a Feed instance from the given path and given distance units.
@@ -355,9 +359,8 @@ def _read_feed_from_path(path: pl.Path, dist_units: str) -> "Feed":
 
     - Ignore non-GTFS files in the feed
     - Automatically strip whitespace from the column names in GTFS files
-
     """
-    path = pl.Path(path)
+    path = pb.Path(path)
     if not path.exists():
         raise ValueError(f"Path {path} does not exist")
 
@@ -365,7 +368,7 @@ def _read_feed_from_path(path: pl.Path, dist_units: str) -> "Feed":
     if path.is_file():
         zipped = True
         tmp_dir = tempfile.TemporaryDirectory()
-        src_path = pl.Path(tmp_dir.name)
+        src_path = pb.Path(tmp_dir.name)
         shutil.unpack_archive(str(path), tmp_dir.name, "zip")
     else:
         zipped = False
@@ -373,6 +376,7 @@ def _read_feed_from_path(path: pl.Path, dist_units: str) -> "Feed":
 
     # Read files into feed dictionary of DataFrames
     feed_dict = {table: None for table in cs.DTYPES}
+
     for p in src_path.iterdir():
         table = p.stem
         # Skip empty files, irrelevant files, and files with no data
@@ -382,27 +386,25 @@ def _read_feed_from_path(path: pl.Path, dist_units: str) -> "Feed":
             and p.suffix == ".txt"
             and table in feed_dict
         ):
-            # utf-8-sig gets rid of the byte order mark (BOM);
-            # see http://stackoverflow.com/questions/17912307/u-ufeff-in-python-string
-            csv_options = {
-                "na_values": ["", " ", "nan", "NaN", "null"],  # Add space to na_values
-                "keep_default_na": True,
-                "dtype_backend": "numpy_nullable",  # Use nullable dtypes
-            }
-            df = pd.read_csv(
-                p, dtype=cs.DTYPES[table], encoding="utf-8-sig", **csv_options
+            f = pl.scan_csv(
+                p,
+                schema_overrides=cs.DTYPES[table],
+                encoding="utf8-lossy",
+                null_values=["", " ", "nan", "NaN", "null"],
+                ignore_errors=True,
             )
-            if not df.empty:
-                feed_dict[table] = cn.clean_column_names(df)
+            if not hp.is_empty(f):
+                feed_dict[table] = cn.clean_column_names(f)
+            feed_dict[table] = f
 
     feed_dict["dist_units"] = dist_units
+    feed = Feed(**feed_dict)
 
-    # Delete temporary directory
+    # Don't remove tmp dir, so lazy tables work. Keep it alive on the Feed.
     if zipped:
-        tmp_dir.cleanup()
+        feed._tmp_dir = tmp_dir  # keep reference alive
 
-    # Create feed
-    return Feed(**feed_dict)
+    return feed
 
 
 def _read_feed_from_url(url: str, dist_units: str) -> "Feed":
@@ -420,14 +422,14 @@ def _read_feed_from_url(url: str, dist_units: str) -> "Feed":
     """
     f = tempfile.NamedTemporaryFile(delete=False)
     with requests.get(url) as r:
-        f.write(r._content)
+        f.write(r.content)
     f.close()
-    feed = _read_feed_from_path(f.name, dist_units=dist_units)
-    pl.Path(f.name).unlink()
+    feed = _read_feed_from_path(pb.Path(f.name), dist_units=dist_units)
+    pb.Path(f.name).unlink(missing_ok=True)
     return feed
 
 
-def read_feed(path_or_url: pl.Path | str, dist_units: str) -> "Feed":
+def read_feed(path_or_url: pb.Path | str, dist_units: str) -> "Feed":
     """
     Create a Feed instance from the given path or URL and given distance units.
     If the path exists, then call :func:`_read_feed_from_path`.
@@ -442,12 +444,21 @@ def read_feed(path_or_url: pl.Path | str, dist_units: str) -> "Feed":
 
     """
     try:
-        path_exists = pl.Path(path_or_url).exists()
+        path_exists = pb.Path(path_or_url).exists()
     except OSError:
         path_exists = False
     if path_exists:
-        return _read_feed_from_path(path_or_url, dist_units=dist_units)
+        return _read_feed_from_path(pb.Path(path_or_url), dist_units=dist_units)
     elif requests.head(path_or_url).ok:
-        return _read_feed_from_url(path_or_url, dist_units=dist_units)
+        return _read_feed_from_url(str(path_or_url), dist_units=dist_units)
     else:
         raise ValueError("Path does not exist or URL has bad status.")
+
+    def close_tmp(self: "Feed") -> None:
+        """
+        Close this Feed's temporary directory (to free memory),
+        if it has one, that is, if it was created by reading from a ZIP file.
+        """
+        if hasattr(self, "_tmp_dir") and self._tmp_dir is not None:
+            self._tmp_dir.cleanup()
+            self._tmp_dir = None

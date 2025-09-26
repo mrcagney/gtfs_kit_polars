@@ -311,7 +311,7 @@ def compute_network_stats_0(
     null_stats = pd.DataFrame(columns=final_cols)
 
     # Handle defunct case
-    if stop_times_subset.empty or trip_stats_subset.empty:
+    if stop_times_subset.is_empty() or trip_stats_subset.is_empty():
         return null_stats
 
     # Handle generic case
@@ -536,7 +536,7 @@ def compute_network_time_series(
     rts = feed.compute_route_time_series(dates, trip_stats, freq=freq)
 
     # Handle defunct case
-    if rts.empty:
+    if rts.is_empty():
         return null_stats
 
     if trip_stats is None:
@@ -591,7 +591,7 @@ def create_shapes(feed: "Feed", *, all_trips: bool = False) -> "Feed":
     ]
     f = f.sort_values(["trip_id", "stop_sequence"])
 
-    if f.empty:
+    if f.is_empty():
         # Nothing to do
         return feed
 
@@ -786,7 +786,7 @@ def restrict_to_dates(feed: "Feed", dates: list[str]) -> "Feed":
     """
     # Get every trip that is active on at least one of the dates
     trip_activity = feed.compute_trip_activity(dates)
-    if trip_activity.empty:
+    if trip_activity.is_empty():
         trip_ids = []
     else:
         trip_ids = trip_activity.loc[

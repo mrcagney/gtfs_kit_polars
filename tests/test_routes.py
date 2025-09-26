@@ -157,7 +157,7 @@ def test_build_route_timetable():
 
     # Empty check
     f = gkr.build_route_timetable(feed, route_id, dates[2:])
-    assert f.empty
+    assert f.is_empty()
 
 
 def test_routes_to_geojson():
@@ -251,7 +251,7 @@ def test_compute_route_stats_0():
 
     # Empty check
     rs = gkr.compute_route_stats_0(pd.DataFrame(), split_directions=split_directions)
-    assert rs.empty
+    assert rs.is_empty()
 
 
 def test_compute_route_stats():
@@ -314,7 +314,7 @@ def test_compute_route_stats():
         rs = gkr.compute_route_stats(
             feed, trip_stats_subset, [], split_directions=split_directions
         )
-        assert rs.empty
+        assert rs.is_empty()
 
 
 @pytest.mark.slow
@@ -369,7 +369,7 @@ def test_compute_route_time_series_0():
     rts = gkr.compute_route_time_series_0(
         pd.DataFrame(), split_directions=split_directions, freq="1h"
     )
-    assert rts.empty
+    assert rts.is_empty()
 
 
 def test_compute_route_time_series():
@@ -426,4 +426,4 @@ def test_compute_route_time_series():
         rts = gkr.compute_route_time_series(
             feed, ["19990101"], trip_stats, split_directions=split_directions
         )
-        assert rts.empty
+        assert rts.is_empty()

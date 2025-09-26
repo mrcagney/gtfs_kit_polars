@@ -133,11 +133,11 @@ def test_aggregate_routes():
 
     # Feeds should have same trip DataFrames excluding route IDs
     feed1.trips["route_id"] = feed2.trips["route_id"]
-    assert hp.almost_equal(feed1.trips, feed2.trips)
+    assert hp.are_equal(feed1.trips, feed2.trips)
 
     # Feeds should have same fare rules DataFrames excluding route IDs
     feed1.fare_rules["route_id"] = feed2.fare_rules["route_id"]
-    assert hp.almost_equal(feed1.fare_rules, feed2.fare_rules)
+    assert hp.are_equal(feed1.fare_rules, feed2.fare_rules)
 
     # Feeds should have equal attributes excluding routes, trips, and fare rules
     # DataFrames
@@ -166,7 +166,7 @@ def test_aggregate_stops():
 
     # Feeds should have same stop times, excluding stop IDs
     feed1.stop_times["stop_id"] = feed2.stop_times.stop_id
-    assert hp.almost_equal(feed1.stop_times, feed2.stop_times)
+    assert hp.are_equal(feed1.stop_times, feed2.stop_times)
 
     # Feeds should have equal attributes excluding
     # stops stop times DataFrames

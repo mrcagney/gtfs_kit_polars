@@ -53,7 +53,7 @@ def append_dist_to_stop_times(feed: "Feed") -> "Feed":
     distances and use them and their corresponding departure times to linearly
     interpolate the rest of the distances.
     """
-    if feed.shapes is None or feed.shapes.empty:
+    if feed.shapes is None or feed.shapes.is_empty():
         return feed
 
     # Get stop and shape geometries as dictionaries

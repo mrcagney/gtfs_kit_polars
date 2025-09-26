@@ -3,29 +3,27 @@ from pathlib import Path
 import shutil
 import tempfile
 
-import pandas as pd
-from pandas.testing import assert_frame_equal
-import numpy as np
+import polars as pl
 
-from .context import gtfs_kit_next, DATA_DIR
+from .context import DATA_DIR
 from gtfs_kit_next import feed as gkf
 from gtfs_kit_next import constants as cs
 
 
 def test_feed():
-    feed = gkf.Feed(agency=pd.DataFrame(), dist_units="km")
+    feed = gkf.Feed(agency=pl.DataFrame(), dist_units="km")
     for key in cs.FEED_ATTRS:
         val = getattr(feed, key)
         if key == "dist_units":
             assert val == "km"
         elif key == "agency":
-            assert isinstance(val, pd.DataFrame)
+            assert isinstance(val, pl.LazyFrame)
         else:
             assert val is None
 
 
 def test_str():
-    feed = gkf.Feed(agency=pd.DataFrame(), dist_units="km")
+    feed = gkf.Feed(agency=pl.DataFrame(), dist_units="km")
     assert isinstance(str(feed), str)
 
 
@@ -34,25 +32,25 @@ def test_eq():
 
     feed1 = gkf.Feed(
         dist_units="m",
-        stops=pd.DataFrame([[1, 2], [3, 4]], columns=["a", "b"]),
+        stops=pl.DataFrame([[1, 2], [3, 4]], schema=["a", "b"]),
     )
     assert feed1 == feed1
 
     feed2 = gkf.Feed(
         dist_units="m",
-        stops=pd.DataFrame([[4, 3], [2, 1]], columns=["b", "a"]),
+        stops=pl.DataFrame([[4, 3], [2, 1]], schema=["b", "a"]),
     )
     assert feed1 == feed2
 
     feed2 = gkf.Feed(
         dist_units="m",
-        stops=pd.DataFrame([[3, 4], [2, 1]], columns=["b", "a"]),
+        stops=pl.DataFrame([[3, 4], [2, 1]], schema=["b", "a"]),
     )
     assert feed1 != feed2
 
     feed2 = gkf.Feed(
         dist_units="m",
-        stops=pd.DataFrame([[4, 3], [2, 1]], columns=["b", "a"]),
+        stops=pl.DataFrame([[4, 3], [2, 1]], schema=["b", "a"]),
     )
     assert feed1 == feed2
 
@@ -64,51 +62,44 @@ def test_copy():
     feed1 = gkf.read_feed(DATA_DIR / "sample_gtfs.zip", dist_units="km")
     feed2 = feed1.copy()
 
-    # Check attributes
     for key in cs.FEED_ATTRS:
-        val = getattr(feed2, key)
-        expect_val = getattr(feed1, key)
-        if isinstance(val, pd.DataFrame):
-            assert_frame_equal(val, expect_val)
-        elif isinstance(val, pd.core.groupby.DataFrameGroupBy):
-            assert val.groups == expect_val.groups
+        v = getattr(feed2, key)
+        w = getattr(feed1, key)
+        if isinstance(v, pl.LazyFrame):
+            assert v.collect().equals(w.collect())
         else:
-            assert val == expect_val
+            assert v == w
 
 
 # --------------------------------------------
 # Test functions about inputs and outputs
 # --------------------------------------------
 def test_list_feed():
-    # Bad path
     with pytest.raises(ValueError):
         gkf.list_feed("bad_path!")
 
     for path in [DATA_DIR / "sample_gtfs.zip", DATA_DIR / "sample_gtfs"]:
         f = gkf.list_feed(path)
-        assert isinstance(f, pd.DataFrame)
-        assert set(f.columns) == {"file_name", "file_size"}
+        assert isinstance(f, pl.DataFrame)
+        assert set(f.collect_schema().names()) == {"file_name", "file_size"}
         assert f.shape[0] in [12, 13]
 
 
 def test_read_feed():
-    # Bad path
     with pytest.raises(ValueError):
         gkf.read_feed("bad_path!", dist_units="km")
 
-    # Bad dist_units
     with pytest.raises(ValueError):
         gkf.read_feed(DATA_DIR / "sample_gtfs.zip", dist_units="bingo")
 
-    # Requires dist_units
     with pytest.raises(TypeError):
-        gkf.read_feed(path=DATA_DIR / "sample_gtfs.zip")
+        gkf.read_feed(path=DATA_DIR / "sample_gtfs.zip")  # missing dist_units
 
-    # Success
     feed = gkf.read_feed(DATA_DIR / "sample_gtfs.zip", dist_units="m")
+    assert isinstance(feed, gkf.Feed)
 
-    # Success
-    feed = gkf.read_feed(DATA_DIR / "sample_gtfs", dist_units="m")
+    feed = gkf.read_feed(DATA_DIR / "cairns_gtfs.zip", dist_units="m")
+    assert isinstance(feed, gkf.Feed)
 
     # Feed should have None feed_info table
     assert feed.feed_info is None
@@ -127,20 +118,39 @@ def test_to_file():
         except Exception:
             shutil.rmtree(str(out_path))
 
-    # Test that integer columns with NaNs get output properly.
+    # Test that integer columns with nulls get output properly.
     feed3 = gkf.read_feed(DATA_DIR / "sample_gtfs.zip", dist_units="km")
-    f = feed3.trips.copy()
-    f.loc[0, "direction_id"] = np.nan
-    f.loc[1, "direction_id"] = 1
-    f.loc[2, "direction_id"] = 0
-    feed3.trips = f
+
+    # Collect trips, set direction_id on the first three rows: [None, 1, 0]
+    t = (
+        feed3.trips
+        .collect()
+        .with_row_index("i")
+        .with_columns(
+            pl.when(pl.col("i") == 0)
+            .then(pl.lit(None))
+            .when(pl.col("i") == 1)
+            .then(pl.lit(1))
+            .when(pl.col("i") == 2)
+            .then(pl.lit(0))
+            .otherwise(pl.col("direction_id"))
+            .cast(pl.Int8)
+            .alias("direction_id")
+        )
+        .drop("i")
+    )
+    feed3.trips = t.lazy()
+
     q = DATA_DIR / "bingo.zip"
     feed3.to_file(q)
 
     tmp_dir = tempfile.TemporaryDirectory()
     shutil.unpack_archive(str(q), tmp_dir.name, "zip")
     qq = Path(tmp_dir.name) / "trips.txt"
-    t = pd.read_csv(qq, dtype={"direction_id": "Int8"})
-    assert t[~t["direction_id"].isin([pd.NA, 0, 1])].empty
+    u = pl.read_csv(qq, schema_overrides={"direction_id": pl.Int8})
+
+    bad = u.filter(~pl.col("direction_id").is_in([None, 0, 1]))
+    assert bad.is_empty()
+
     tmp_dir.cleanup()
     q.unlink()

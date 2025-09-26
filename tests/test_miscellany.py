@@ -147,7 +147,7 @@ def test_compute_network_stats():
         f = gkm.compute_network_stats(
             feed, ["19990101"], trip_stats, split_route_types=split_route_types
         )
-        assert f.empty
+        assert f.is_empty()
 
 
 def test_compute_network_time_series():
@@ -190,7 +190,7 @@ def test_compute_network_time_series():
         f = gkm.compute_network_time_series(
             feed, ["19990101"], split_route_types=split_route_types
         )
-        assert f.empty
+        assert f.is_empty()
 
 
 def test_create_shapes():
@@ -293,11 +293,11 @@ def test_restrict_to_dates():
     dates = ["20180101"]
     feed2 = gkm.restrict_to_dates(feed1, dates)
     assert feed2.agency.equals(feed1.agency)
-    assert feed2.trips.empty
-    assert feed2.routes.empty
-    assert feed2.shapes.empty
-    assert feed2.stops.empty
-    assert feed2.stop_times.empty
+    assert feed2.trips.is_empty()
+    assert feed2.routes.is_empty()
+    assert feed2.shapes.is_empty()
+    assert feed2.stops.is_empty()
+    assert feed2.stop_times.is_empty()
 
 
 def test_restrict_to_trips():
@@ -317,7 +317,7 @@ def test_restrict_to_trips():
     # All non-agency tables should be empty
     for table in gkc.DTYPES:
         if table != "agency" and getattr(feed1, table) is not None:
-            assert getattr(feed2, table).empty
+            assert getattr(feed2, table).is_empty()
 
     feed = nyc_subway
     # Grab a stop with a parent station
@@ -440,4 +440,4 @@ def test_compute_screen_line_counts():
 
     # Empty check
     f = gkm.compute_screen_line_counts(feed, screen_lines, ["20010101"])
-    assert f.empty
+    assert f.is_empty()

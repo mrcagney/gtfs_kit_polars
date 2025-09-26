@@ -80,7 +80,7 @@ def test_build_stop_timetable():
 
     # Empty check
     f = gks.build_stop_timetable(feed, stop_id, [])
-    assert f.empty
+    assert f.is_empty()
 
 
 def test_geometrize_stops():
@@ -182,7 +182,7 @@ def test_compute_stop_stats_0():
 
     # Empty check
     stats = gks.compute_stop_stats_0(feed.stop_times, pd.DataFrame())
-    assert stats.empty
+    assert stats.is_empty()
 
 
 def test_compute_stop_stats():
@@ -228,7 +228,7 @@ def test_compute_stop_stats():
         f = gks.compute_stop_stats(
             feed, ["19990101"], split_directions=split_directions
         )
-        assert f.empty
+        assert f.is_empty()
 
 
 def test_compute_stop_time_series_0():
@@ -273,7 +273,7 @@ def test_compute_stop_time_series_0():
     stops_ts = gks.compute_stop_time_series_0(
         feed.stop_times, pd.DataFrame(), freq="1h", split_directions=split_directions
     )
-    assert stops_ts.empty
+    assert stops_ts.is_empty()
 
 
 def test_compute_stop_time_series():
@@ -318,4 +318,4 @@ def test_compute_stop_time_series():
     stops_ts = gks.compute_stop_time_series(
         feed, dates=["19990101"], split_directions=split_directions
     )
-    assert stops_ts.empty
+    assert stops_ts.is_empty()

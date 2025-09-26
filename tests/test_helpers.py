@@ -104,15 +104,15 @@ def test_get_peak_indices():
     assert_array_equal(get, expect)
 
 
-def test_almost_equal():
+def test_are_equal():
     f = pd.DataFrame([[1, 2], [3, 4]], columns=["a", "b"])
-    assert gkh.almost_equal(f, f)
+    assert gkh.are_equal(f, f)
     g = pd.DataFrame([[4, 3], [2, 1]], columns=["b", "a"])
-    assert gkh.almost_equal(f, g)
+    assert gkh.are_equal(f, g)
     h = pd.DataFrame([[1, 2], [5, 4]], columns=["a", "b"])
-    assert not gkh.almost_equal(f, h)
+    assert not gkh.are_equal(f, h)
     h = pd.DataFrame()
-    assert not gkh.almost_equal(f, h)
+    assert not gkh.are_equal(f, h)
 
 
 def test_is_not_null():

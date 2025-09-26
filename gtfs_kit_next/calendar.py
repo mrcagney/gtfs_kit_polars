@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 import dateutil.relativedelta as rd
 
+import polars as pl
+
 from . import helpers as hp
 
 # Help mypy but avoid circular imports
@@ -23,16 +25,28 @@ def get_dates(feed: "Feed", *, as_date_obj: bool = False) -> list[str]:
     If ``as_date_obj``, then return datetime.date objects instead.
     """
     dates = []
-    if feed.calendar is not None and not feed.calendar.empty:
-        if "start_date" in feed.calendar.columns:
-            dates.append(feed.calendar["start_date"].min())
-        if "end_date" in feed.calendar.columns:
-            dates.append(feed.calendar["end_date"].max())
-    if feed.calendar_dates is not None and not feed.calendar_dates.empty:
-        if "date" in feed.calendar_dates.columns:
-            start = feed.calendar_dates["date"].min()
-            end = feed.calendar_dates["date"].max()
-            dates.extend([start, end])
+
+    if feed.calendar is not None and not hp.is_empty(feed.calendar):
+        f = feed.calendar
+        if "start_date" in f.collect_schema().names():
+            a = f.select(pl.col("start_date").min()).collect().item()
+            if a is not None:
+                dates.append(a)
+        if "end_date" in f.collect_schema().names():
+            b = f.select(pl.col("end_date").max()).collect().item()
+            if b is not None:
+                dates.append(b)
+
+    if feed.calendar_dates is not None and not hp.is_empty(feed.calendar_dates):
+        f = feed.calendar_dates
+        if "date" in f.collect_schema().names():
+            a = f.select(pl.col("date").min()).collect().item()
+            b = f.select(pl.col("date").max()).collect().item()
+            if a is not None:
+                dates.append(a)
+            if b is not None:
+                dates.append(b)
+
     if not dates:
         return []
 
@@ -41,12 +55,10 @@ def get_dates(feed: "Feed", *, as_date_obj: bool = False) -> list[str]:
     num_days = (end_date - start_date).days
     result = [start_date + rd.relativedelta(days=+d) for d in range(num_days + 1)]
 
-    # Convert dates back to strings if required
     if not as_date_obj:
         result = [hp.date_to_datestr(x) for x in result]
 
     return result
-
 
 def get_week(feed: "Feed", k: int, *, as_date_obj: bool = False) -> list[str]:
     """
