@@ -16,7 +16,7 @@ def _():
     import matplotlib
     import folium as fl
 
-    import gtfs_kit_next as gk
+    import gtfs_kit_polars as gk
 
     DATA = pl.Path("data")
     return DATA, fl, gk, gp, mo, pd
@@ -144,7 +144,7 @@ def _(feed):
     # Alternatively map routes without stops using GeoPandas's explore
 
     (
-        feed.get_routes(as_gdf=True).explore(
+        feed.get_routes(as_geo=True).explore(
             column="route_short_name",
             style_kwds=dict(weight=3),
             highlight_kwds=dict(weight=8),

@@ -8,9 +8,9 @@ import polars as pl
 # Make package importable from tests
 sys.path.insert(0, os.path.abspath(".."))
 
-import gtfs_kit_next
-from gtfs_kit_next.feed import read_feed
-from gtfs_kit_next.constants import DTYPES
+import gtfs_kit_polars
+from gtfs_kit_polars.feed import read_feed
+from gtfs_kit_polars.constants import DTYPES
 
 # Load/create test feeds
 DATA_DIR = pb.Path("data")
@@ -24,7 +24,9 @@ cairns_shapeless.shapes = None
 
 # Remove shape_id on trips (set to nulls)
 t = cairns_shapeless.trips
-cairns_shapeless.trips = cairns_shapeless.trips.with_columns(pl.lit(None).cast(pl.Utf8).alias("shape_id"))
+cairns_shapeless.trips = cairns_shapeless.trips.with_columns(
+    pl.lit(None).cast(pl.Utf8).alias("shape_id")
+)
 
 # Calendar helpers
 week = cairns.get_first_week()

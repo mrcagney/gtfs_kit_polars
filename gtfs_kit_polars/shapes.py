@@ -38,17 +38,17 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
     feed = feed.copy()
     s = feed.shapes
 
-    lon, lat =  s.limit(1).select("shape_pt_lon", "shape_pt_lat").collect().row(0)
-    utm_srid = hp.get_utm_srid(lon, lat)
+    lon, lat = s.limit(1).select("shape_pt_lon", "shape_pt_lat").collect().row(0)
+    utm_srid = hp.get_utm_srid_0(lon, lat)
 
     s = (
         # Build point geometries in WGS84 then convert to UTM
-        s.with_columns(
+        s.sort("shape_id", "shape_pt_sequence")
+        .with_columns(
             geometry=st.point(pl.concat_arr("shape_pt_lon", "shape_pt_lat"))
-            .st.set_srid(4326)
+            .st.set_srid(cs.WGS84)
             .st.to_srid(utm_srid)
         )
-        .sort(["shape_id", "shape_pt_sequence"])
         # Get successive point distances in meters
         .with_columns(
             prev=pl.col("geometry").shift(1).over("shape_id"),
@@ -60,12 +60,12 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
                 .otherwise(pl.col("geometry").st.distance(pl.col("prev")))
             )
         )
-        .with_columns(
-            cum_m=pl.col("seg_m").cum_sum().over("shape_id")
-        )
+        .with_columns(cum_m=pl.col("seg_m").cum_sum().over("shape_id"))
         # Convert distances to feed units
         .with_columns(
-            shape_dist_traveled=pl.col("cum_m").map_elements(lambda x: hp.get_convert_dist("m", feed.dist_units)(x)),
+            shape_dist_traveled=pl.col("cum_m").map_elements(
+                lambda x: hp.get_convert_dist("m", feed.dist_units)(x)
+            ),
         )
         # Clean up
         .drop("geometry", "prev", "seg_m", "cum_m")
@@ -75,8 +75,8 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
 
 
 def geometrize_shapes(
-    shapes: pd.DataFrame, *, use_utm: bool = False
-) -> gpd.GeoDataFrame:
+    shapes: pl.DataFrame | pl.LazyFrame, *, use_utm: bool = False
+) -> pl.DataFrame | pl.LazyFrame:
     """
     Given a GTFS shapes DataFrame, convert it to a GeoDataFrame of LineStrings
     and return the result, which will no longer have the columns
@@ -85,60 +85,63 @@ def geometrize_shapes(
 
     If ``use_utm``, then use local UTM coordinates for the geometries.
     """
-
-    def my_agg(group):
-        d = {}
-        coords = group[["shape_pt_lon", "shape_pt_lat"]].values
-        try:
-            d["geometry"] = sg.LineString(coords)
-        except shapely.errors.GEOSException:
-            d["geometry"] = sg.Point(coords)
-
-        return pd.Series(d)
-
     g = (
-        shapes.sort_values(["shape_id", "shape_pt_sequence"])
-        .groupby("shape_id", sort=False)
-        .apply(my_agg, include_groups=False)
-        .reset_index()
-        .pipe(gpd.GeoDataFrame)
-        .set_crs(cs.WGS84)
+        shapes.sort(["shape_id", "shape_pt_sequence"])
+        .group_by("shape_id", maintain_order=True)
+        .agg(
+            coords=pl.concat_list("shape_pt_lon", "shape_pt_lat"),
+            n=pl.len(),
+        )
+        .with_columns(
+            geometry=(
+                pl.when(pl.col("n") >= 2)
+                .then(st.linestring("coords"))
+                .otherwise(st.point(pl.col("coords").list.get(0)))
+            )
+        )
+        .with_columns(geometry=pl.col("geometry").st.set_srid(4326))
+        .select("shape_id", "geometry")
     )
 
     if use_utm:
-        g = g.to_crs(g.estimate_utm_crs())
+        lon, lat = (
+            shapes.limit(1).select(["shape_pt_lon", "shape_pt_lat"]).collect().row(0)
+        )
+        utm_srid = hp.get_utm_srid_0(lon, lat)
+        g = g.with_columns(geometry=pl.col("geometry").st.to_srid(utm_srid))
 
     return g
 
 
-def ungeometrize_shapes(shapes_g: gpd.GeoDataFrame) -> pd.DataFrame:
+def ungeometrize_shapes(shapes_g):
     """
     The inverse of :func:`geometrize_shapes`.
 
-    If ``shapes_g`` is in UTM coordinates (has a UTM CRS property),
-    then convert those UTM coordinates back to WGS84 coordinates,
-    which is the standard for a GTFS shapes table.
+    If ``shapes_g`` is in UTM coordinates (has a UTM SRID),
+    convert those coordinates back to WGS84 (EPSG:4326), which is the
+    standard for a GTFS shapes table.
     """
-    shapes_g = shapes_g.to_crs(cs.WGS84)
-
-    F = []
-    for index, row in shapes_g.iterrows():
-        F.extend(
-            [
-                [row["shape_id"], i, x, y]
-                for i, (x, y) in enumerate(row["geometry"].coords)
-            ]
+    return (
+        shapes_g
+        # Reproject to WGS84
+        .with_columns(geometry=pl.col("geometry").st.to_srid(cs.WGS84))
+        .select("shape_id", coords=pl.col("geometry").st.coordinates())
+        .explode("coords")
+        .with_columns(
+            # coords is now a list [x, y] per row → extract scalars
+            shape_pt_lon=pl.col("coords").list.get(0).cast(pl.Float64),
+            shape_pt_lat=pl.col("coords").list.get(1).cast(pl.Float64),
         )
-
-    return pd.DataFrame(
-        F,
-        columns=[
-            "shape_id",
-            "shape_pt_sequence",
-            "shape_pt_lon",
-            "shape_pt_lat",
-        ],
-    ).astype({"shape_id": "string"})
+        .drop("coords")
+        # Build 0-based sequence per shape_id in explode order
+        .with_row_count("rc")
+        .with_columns(
+            shape_pt_sequence=(pl.col("rc") - pl.col("rc").min().over("shape_id"))
+        )
+        .drop("rc")
+        .with_columns(pl.col("shape_id").cast(pl.Utf8))
+        .select("shape_id", "shape_pt_sequence", "shape_pt_lon", "shape_pt_lat")
+    )
 
 
 def split_simple(
@@ -252,18 +255,18 @@ def split_simple(
 
 
 def get_shapes(
-    feed: "Feed", *, as_gdf: bool = False, use_utm: bool = False
+    feed: "Feed", *, as_geo: bool = False, use_utm: bool = False
 ) -> gpd.DataFrame | None:
     """
     Get the shapes DataFrame for the given feed, which could be ``None``.
-    If ``as_gdf``, then return it as GeoDataFrame with a 'geometry' column
+    If ``as_geo``, then return it as GeoDataFrame with a 'geometry' column
     of linestrings and no 'shape_pt_sequence', 'shape_pt_lon', 'shape_pt_lat',
     'shape_dist_traveled' columns.
     The GeoDataFrame will have a UTM CRS if ``use_utm``; otherwise it will have a
     WGS84 CRS.
     """
     f = feed.shapes
-    if f is not None and as_gdf:
+    if f is not None and as_geo:
         f = geometrize_shapes(f, use_utm=use_utm)
     return f
 
@@ -280,10 +283,12 @@ def build_geometry_by_shape(
     if feed.shapes is None:
         return dict()
 
-    g = get_shapes(feed, as_gdf=True, use_utm=use_utm)
+    g = get_shapes(feed, as_geo=True, use_utm=use_utm).with_columns(
+        geometry=pl.col("geometry").st.to_shapely()
+    )
     if shape_ids is not None:
         g = g.loc[lambda x: x["shape_id"].isin(shape_ids)]
-    return dict(g[["shape_id", "geometry"]].values)
+    return dict(g.select("shape_id", "geometry").collect().rows())
 
 
 def shapes_to_geojson(feed: "Feed", shape_ids: Iterable[str] | None = None) -> dict:
@@ -298,7 +303,7 @@ def shapes_to_geojson(feed: "Feed", shape_ids: Iterable[str] | None = None) -> d
     If the subset is empty, then return a FeatureCollection with an empty list of
     features.
     """
-    g = get_shapes(feed, as_gdf=True)
+    g = get_shapes(feed, as_geo=True)
     if shape_ids is not None:
         g = g.loc[lambda x: x["shape_id"].isin(shape_ids)]
     if g is None or g.is_empty():
@@ -316,14 +321,14 @@ def get_shapes_intersecting_geometry(
     geometry: sg.base.BaseGeometry,
     shapes_g: gpd.GeoDataFrame | None = None,
     *,
-    as_gdf: bool = False,
+    as_geo: bool = False,
 ) -> pd.DataFrame | None:
     """
     If the Feed has no shapes, then return None.
     Otherwise, return the subset of ``feed.shapes`` that contains all shapes that
     intersect the given Shapely WGS84 geometry, e.g. a Polygon or LineString.
 
-    If ``as_gdf``, then return the shapes as a GeoDataFrame.
+    If ``as_geo``, then return the shapes as a GeoDataFrame.
     Specifying ``shapes_g`` will skip the first step of the
     algorithm, namely, geometrizing ``feed.shapes``.
     """
@@ -333,13 +338,13 @@ def get_shapes_intersecting_geometry(
     if shapes_g is not None:
         g = shapes_g.copy()
     else:
-        g = get_shapes(feed, as_gdf=True)
+        g = get_shapes(feed, as_geo=True)
 
     cols = g.columns
     g["hit"] = g["geometry"].intersects(geometry)
     g = g.loc[lambda x: x["hit"]].filter(cols)
 
-    if as_gdf:
+    if as_geo:
         result = g
     else:
         result = ungeometrize_shapes(g)

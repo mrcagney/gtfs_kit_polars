@@ -22,15 +22,15 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/mrcagney/gtfs_kit_next"
-Documentation = "https://mrcagney.github.io/gtfs_kit_next_docs"
+Repository = "https://github.com/mrcagney/gtfs_kit_polars"
+Documentation = "https://mrcagney.github.io/gtfs_kit_polars_docs"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.setuptools]
-packages = ["gtfs_kit_next"]
+packages = ["gtfs_kit_polars"]
 
 [tool.uv]
 dev-dependencies = [

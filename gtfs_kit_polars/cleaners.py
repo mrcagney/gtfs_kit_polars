@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from .feed import Feed
 
 
-def clean_column_names(f: pl.DataFrame|pl.LazyFrame) -> pl.DataFrame|pl.LazyFrame:
+def clean_column_names(f: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
     """
     Strip the whitespace from all column names in the given table
     and return the result.

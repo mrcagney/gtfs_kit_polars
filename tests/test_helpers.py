@@ -7,9 +7,9 @@ import shapely.geometry as sg
 from numpy.testing import assert_array_equal
 from pandas.testing import assert_series_equal
 
-from gtfs_kit_next import helpers as gkh
+from gtfs_kit_polars import helpers as gkh
 
-from .context import cairns, cairns_dates, cairns_trip_stats, gtfs_kit_next
+from .context import cairns, cairns_dates, cairns_trip_stats, gtfs_kit_polars
 
 
 def test_timestr_to_seconds():

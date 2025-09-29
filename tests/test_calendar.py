@@ -1,6 +1,6 @@
-from .context import gtfs_kit_next, cairns
-from gtfs_kit_next import calendar as gkc
-from gtfs_kit_next import helpers as hp
+from .context import gtfs_kit_polars, cairns
+from gtfs_kit_polars import calendar as gkc
+from gtfs_kit_polars import helpers as hp
 
 
 def test_get_dates():

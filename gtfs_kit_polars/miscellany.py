@@ -646,7 +646,7 @@ def compute_bounds(feed: "Feed", stop_ids: list[str] | None = None) -> np.array:
     """
     from .stops import get_stops
 
-    g = get_stops(feed, as_gdf=True)
+    g = get_stops(feed, as_geo=True)
     if stop_ids is not None:
         g = g.loc[lambda x: x["stop_id"].isin(stop_ids)]
 
@@ -660,7 +660,7 @@ def compute_convex_hull(feed: "Feed", stop_ids: list[str] | None = None) -> sg.P
     """
     from .stops import get_stops
 
-    g = get_stops(feed, as_gdf=True)
+    g = get_stops(feed, as_geo=True)
     if stop_ids is not None:
         g = g.loc[lambda x: x["stop_id"].isin(stop_ids)]
 
@@ -674,7 +674,7 @@ def compute_centroid(feed: "Feed", stop_ids: list[str] | None = None) -> sg.Poin
     """
     from .stops import get_stops
 
-    g = get_stops(feed, as_gdf=True)
+    g = get_stops(feed, as_geo=True)
     if stop_ids is not None:
         g = g.loc[lambda x: x["stop_id"].isin(stop_ids)]
 
@@ -963,7 +963,7 @@ def compute_screen_line_counts(
     # Need subshapes to have only small gaps between them,
     # so `segmentize_m` needs to be small.
     subshapes = (
-        feed.get_shapes(as_gdf=True, use_utm=True)
+        feed.get_shapes(as_geo=True, use_utm=True)
         .sjoin(screen_lines)
         .drop_duplicates("shape_id")
         .pipe(split_simple, segmentize_m=segmentize_m)

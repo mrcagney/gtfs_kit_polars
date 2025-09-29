@@ -24,11 +24,13 @@ from . import helpers as hp
 if TYPE_CHECKING:
     from .feed import Feed
 
+
 def get_active_services(feed: "Feed", date: str) -> list[str]:
     """
     Given a Feed and a date string in YYYYMMDD format,
     return the service IDs that are active on the date.
     """
+
     # helper: empty one-col LazyFrame
     def _empty():
         return pl.LazyFrame(schema={"service_id": pl.Utf8})
@@ -62,8 +64,7 @@ def get_active_services(feed: "Feed", date: str) -> list[str]:
         pl.concat([active_1, active_2])
         .unique()
         .join(removed, on="service_id", how="anti")
-        .collect()
-        ["service_id"]
+        .collect()["service_id"]
         .to_list()
     )
 
@@ -73,9 +74,9 @@ def get_trips(
     date: str | None = None,
     time: str | None = None,
     *,
-    as_gdf: bool = False,
+    as_geo: bool = False,
     use_utm: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
     Return ``feed.trips``.
     If date (YYYYMMDD date string) is given then subset the result to trips
@@ -83,52 +84,48 @@ def get_trips(
     If a time (HH:MM:SS string, possibly with HH > 23) is given in addition to a date,
     then further subset the result to trips in service at that time.
 
-    If ``as_gdf`` and ``feed.shapes`` is not None, then return the trips as a
+    If ``as_geo`` and ``feed.shapes`` is not None, then return the trips as a
     GeoDataFrame of LineStrings representating trip shapes.
     Use local UTM CRS if ``use_utm``; otherwise it the WGS84 CRS.
-    If ``as_gdf`` and ``feed.shapes`` is ``None``, then raise a ValueError.
+    If ``as_geo`` and ``feed.shapes`` is ``None``, then raise a ValueError.
     """
     if feed.trips is None:
         return None
 
     f = feed.trips
     if date is not None:
-        f = f.loc[lambda x: x["service_id"].isin(get_active_services(feed, date))]
+        f = f.filter(pl.col("service_id").is_in(get_active_services(feed, date)))
 
         if time is not None:
             # Get trips active during given time
-            def get_active(group):
-                d = {}
-                start = group["departure_time"].dropna().min()
-                end = group["departure_time"].dropna().max()
-                try:
-                    result = start <= time <= end
-                except TypeError:
-                    result = False
-                d["is_active"] = result
-                return pd.Series(d)
-
             f = (
-                f.merge(feed.stop_times[["trip_id", "departure_time"]])
-                .groupby("trip_id")
-                .apply(get_active, include_groups=False)
-                .reset_index()
-                .loc[lambda x: x["is_active"]]
-                .merge(f)
-                .drop("is_active", axis=1)
+                f.join_where(
+                    feed.stop_times["trip_id", "departure_time"],
+                    pl.col("trip_id") == feed.stop_times["trip_id"],
+                )
+                .group_by("trip_id")
+                .with_columns(
+                    is_active=(
+                        (pl.col("departure_time").min() <= time)
+                        & (pl.col("departure_time").max() >= time)
+                    )
+                )
+                .filter(pl.col("is_active"))
+                .drop("departure_time", "is_active")
+                .distinct(on="trip_id")
             )
 
-    if as_gdf:
+    if as_geo:
         if feed.shapes is None:
             raise ValueError("This Feed has no shapes.")
         else:
             from .shapes import get_shapes
 
             f = (
-                get_shapes(feed, as_gdf=True, use_utm=use_utm)
-                .filter(["shape_id", "geometry"])
-                .merge(f, how="right")
-                .filter(f.columns.tolist() + ["geometry"])
+                get_shapes(feed, as_geo=True, use_utm=use_utm)
+                .select(["shape_id", "geometry", "crs"])
+                .join(f, on=f["shape_id"], how="right")
+                .select(list(f.schema.names()) + ["geometry", "crs"])
             )
 
     return f
@@ -178,52 +175,66 @@ def compute_busiest_date(feed: "Feed", dates: list[str]) -> str:
     return max(s)[1]
 
 
-def name_stop_patterns(feed: "Feed") -> pd.DataFrame:
+def name_stop_patterns(feed: "Feed") -> pl.LazyFrame:
     """
     For each (route ID, direction ID) pair, find the distinct stop patterns of its
     trips, and assign them each an integer *pattern rank* based on the stop pattern's
     frequency rank, where 1 is the most frequent stop pattern, 2 is the second most
     frequent, etc.
-    Return the DataFrame ``feed.trips`` with the additional column
+    Return the table ``feed.trips`` with the additional column
     ``stop_pattern_name``, which equals the trip's 'direction_id' concatenated with a
     dash and its stop pattern rank.
 
     If ``feed.trips`` has no 'direction_id' column, then temporarily create one equal
     to all zeros, proceed as above, then delete the column.
     """
-    # Collect stop patterns
-    trips = feed.trips.copy()
-    if "direction_id" in trips.columns:
-        has_direction = True
-    else:
-        has_direction = False
-        trips["direction_id"] = 0  # placeholder to ease calculations below
-    f = (
-        feed.stop_times.sort_values(["trip_id", "stop_sequence"])
-        .groupby("trip_id")
-        .apply(
-            lambda x: pd.Series({"stop_pattern": "-".join(x["stop_id"])}),
-            include_groups=False,
-        )
-        .reset_index()
-        .merge(trips[["route_id", "trip_id", "direction_id"]])
-    )
-    # Compute pattern ranks
-    f["rank"] = f.groupby(["route_id", "direction_id"])["stop_pattern"].transform(
-        lambda x: pd.Series(x).map(
-            {pattern: idx + 1 for idx, pattern in enumerate(x.value_counts().index)}
-        )
-    )
-    # Assign pattern names
-    f["stop_pattern_name"] = (
-        f["direction_id"].astype(str).str.cat(f["rank"].astype(str), sep="-")
-    )
-    ff = trips.merge(f[["route_id", "trip_id", "direction_id", "stop_pattern_name"]])
-    # Clean up
-    if not has_direction:
-        del ff["direction_id"]
+    t = feed.trips
+    has_dir = "direction_id" in t.columns
+    tt = t if has_dir else t.with_columns(pl.lit(0).alias("direction_id"))
 
-    return ff
+    # Per-trip stop pattern (ordered stop_ids joined with "-")
+    s = (
+        feed.stop_times.sort(["trip_id", "stop_sequence"])
+        .group_by("trip_id", maintain_order=True)
+        .agg(stop_ids=pl.col("stop_id").implode())
+        .with_columns(stop_pattern=pl.col("stop_ids").list.join("-"))
+        .select(["trip_id", "stop_pattern"])
+    )
+
+    # Attach trip metadata
+    f = s.join(
+        tt.select(["route_id", "trip_id", "direction_id"]), on="trip_id", how="inner"
+    )
+
+    # Count frequency of each stop_pattern within (route_id, direction_id)
+    c = (
+        f.group_by(["route_id", "direction_id", "stop_pattern"])
+        .agg(n=pl.len())
+        .with_columns(
+            # rank 1 = most frequent within (route_id, direction_id)
+            rank=pl.col("n")
+            .rank(method="dense", descending=True)
+            .over(["route_id", "direction_id"])
+        )
+        .select(["route_id", "direction_id", "stop_pattern", "rank"])
+    )
+
+    # Join ranks back and build "direction-rank" names
+    g = (
+        f.join(c, on=["route_id", "direction_id", "stop_pattern"], how="left")
+        .with_columns(
+            stop_pattern_name=pl.concat_str(
+                [pl.col("direction_id").cast(pl.Utf8), pl.col("rank").cast(pl.Utf8)],
+                separator="-",
+            )
+        )
+        .select(["trip_id", "stop_pattern_name"])
+    )
+
+    out = tt.join(g, on="trip_id", how="left")
+    if not has_dir:
+        out = out.drop("direction_id")
+    return out
 
 
 def compute_trip_stats(
@@ -531,7 +542,7 @@ def trips_to_geojson(
         raise ValueError(f"Trip IDs {D} not found in feed.")
 
     # Get trips
-    g = get_trips(feed, as_gdf=True).loc[lambda x: x["trip_id"].isin(trip_ids)]
+    g = get_trips(feed, as_geo=True).loc[lambda x: x["trip_id"].isin(trip_ids)]
     trips_gj = json.loads(g.to_json())
 
     # Get stops if desired

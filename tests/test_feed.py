@@ -6,8 +6,8 @@ import tempfile
 import polars as pl
 
 from .context import DATA_DIR
-from gtfs_kit_next import feed as gkf
-from gtfs_kit_next import constants as cs
+from gtfs_kit_polars import feed as gkf
+from gtfs_kit_polars import constants as cs
 
 
 def test_feed():
@@ -123,8 +123,7 @@ def test_to_file():
 
     # Collect trips, set direction_id on the first three rows: [None, 1, 0]
     t = (
-        feed3.trips
-        .collect()
+        feed3.trips.collect()
         .with_row_index("i")
         .with_columns(
             pl.when(pl.col("i") == 0)

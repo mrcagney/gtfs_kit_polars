@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Iterable
 
 import folium as fl
 import folium.plugins as fp
+import polars as pl
+import polars_st as st
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -32,36 +34,45 @@ STOP_STYLE = {
 }
 
 
-def geometrize_stops(stops: pd.DataFrame, *, use_utm: bool = False) -> gpd.GeoDataFrame:
+def geometrize_stops(
+    stops: pl.DataFrame | pl.LazyFrame, *, use_utm: bool = False
+) -> pl.DataFrame | pl.LazyFrame:
     """
-    Given a stops DataFrame, convert it to a GeoPandas GeoDataFrame of Points
-    and return the result, which will no longer have the columns ``'stop_lon'`` and
-    ``'stop_lat'``.
-    """
-    g = (
-        stops.assign(geometry=gpd.points_from_xy(x=stops.stop_lon, y=stops.stop_lat))
-        .drop(["stop_lon", "stop_lat"], axis=1)
-        .pipe(gpd.GeoDataFrame, crs=cs.WGS84)
-    )
+    Given a GTFS stops Table, convert it to a geotable with a "geometry"
+    column of LineStrings and a "srid" column with the (constant) srid of the geographic
+    projection, e.g. 'EPSG:4326' for the WGS84 srid.
+    Return the resulting geotable, which will no longer have
+    the columns ``'stop_lon'`` and ``'stop_lat'``.
 
+    If ``use_utm``, then use local UTM coordinates for the geometries.
+    """
+    g = stops.with_columns(
+        geometry=st.point(pl.concat_arr("stop_lon", "stop_lat")).st.set_srid(cs.WGS84)
+    ).drop(["stop_lon", "stop_lat"])
     if use_utm:
-        g = g.to_crs(g.estimate_utm_crs())
+        g = hp.to_srid(g, hp.get_utm_srid(g))
 
     return g
 
 
-def ungeometrize_stops(stops_g: gpd.GeoDataFrame) -> pd.DataFrame:
+def ungeometrize_stops(
+    stops_g: pl.DataFrame | pl.LazyFrame,
+) -> pl.DataFrame | pl.LazyFrame:
     """
     The inverse of :func:`geometrize_stops`.
 
-    If ``stops_g`` is in UTM coordinates (has a UTM CRS property),
+    If ``stops_g`` is in UTM coordinates (has a UTM srid property),
     then convert those UTM coordinates back to WGS84 coordinates,
     which is the standard for a GTFS shapes table.
     """
-    f = stops_g.copy().to_crs(cs.WGS84)
-    f["stop_lon"], f["stop_lat"] = zip(*f["geometry"].map(lambda p: [p.x, p.y]))
-    del f["geometry"]
-    return f
+    return (
+        hp.to_srid(stops_g, cs.WGS84)
+        .with_columns(
+            stop_lon=pl.col("geometry").st.x(),
+            stop_lat=pl.col("geometry").st.y(),
+        )
+        .drop("geometry")
+    )
 
 
 def get_stops(
@@ -71,9 +82,9 @@ def get_stops(
     route_ids: Iterable[str] | None = None,
     *,
     in_stations: bool = False,
-    as_gdf: bool = False,
+    as_geo: bool = False,
     use_utm: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
     Return ``feed.stops``.
     If a YYYYMMDD date string is given, then subset to stops
@@ -88,23 +99,46 @@ def get_stops(
     column of points instead of 'stop_lat' and 'stop_lon' columns.
     The GeoDataFrame will have a UTM CRS if ``use_utm`` and a WGS84 CRS otherwise.
     """
-    s = feed.stops.copy()
+    s = feed.stops
+
     if date is not None:
-        A = feed.get_stop_times(date).stop_id
-        s = s.loc[lambda x: x.stop_id.isin(A)].copy()
+        # Get active stop_ids for the given date
+        stop_ids = feed.get_stop_times(date).select("stop_id").unique()
+        s = s.join(stop_ids, on="stop_id", how="semi")
+
     if trip_ids is not None:
-        st = feed.stop_times.copy()
-        B = st.loc[lambda x: x.trip_id.isin(trip_ids), "stop_id"].copy()
-        s = s.loc[lambda x: x.stop_id.isin(B)].copy()
+        # Filter by trip_ids
+        stop_ids = (
+            feed.stop_times.filter(pl.col("trip_id").is_in(trip_ids))
+            .select("stop_id")
+            .unique()
+        )
+        s = s.join(stop_ids, on="stop_id", how="semi")
+
     elif route_ids is not None:
-        A = feed.trips.loc[lambda x: x.route_id.isin(route_ids), "trip_id"].copy()
-        st = feed.stop_times.copy()
-        B = st.loc[lambda x: x.trip_id.isin(A), "stop_id"].copy()
-        s = s.loc[lambda x: x.stop_id.isin(B)].copy()
-    if in_stations and set(["location_type", "parent_station"]) <= set(s.columns):
-        s = s.loc[lambda x: (x.location_type != 1) & (x.parent_station.notna())].copy()
-    if as_gdf:
+        # Filter by route_ids (overrides trip_ids)
+        trip_ids = (
+            feed.trips.filter(pl.col("route_id").is_in(route_ids))
+            .select("trip_id")
+            .unique()
+        )
+        stop_ids = (
+            feed.stop_times.join(trip_ids, on="trip_id", how="semi")
+            .select("stop_id")
+            .unique()
+        )
+        s = s.join(stop_ids, on="stop_id", how="semi")
+
+    if in_stations:
+        # Check if required columns exist
+        if {"location_type", "parent_station"} <= set(s.schema.names()):
+            s = s.filter(
+                (pl.col("location_type") != 1) & ~pl.col("parent_station").is_null()
+            )
+
+    if as_geo:
         s = geometrize_stops(s, use_utm=use_utm)
+
     return s
 
 
@@ -603,10 +637,12 @@ def build_geometry_by_stop(
     """
     Return a dictionary of the form <stop ID> -> <Shapely Point representing stop>.
     """
-    g = get_stops(feed, as_gdf=True, use_utm=use_utm)
+    g = get_stops(feed, as_geo=True, use_utm=use_utm).with_columns(
+        geometry=pl.col("geometry").st.to_shapely()
+    )
     if stop_ids is not None:
-        g = g.loc[lambda x: x["stop_id"].isin(stop_ids)]
-    return dict(g.filter(["stop_id", "geometry"]).values)
+        g = g.filter(pl.col("stop_id").is_in(stop_ids))
+    return dict(g.select("stop_id", "geometry").collect().rows())
 
 
 def stops_to_geojson(feed: "Feed", stop_ids: Iterable[str | None] = None) -> dict:
@@ -626,7 +662,7 @@ def stops_to_geojson(feed: "Feed", stop_ids: Iterable[str | None] = None) -> dic
     if D:
         raise ValueError(f"Stops {D} are not found in feed.")
 
-    g = get_stops(feed, as_gdf=True).loc[lambda x: x["stop_id"].isin(stop_ids)]
+    g = get_stops(feed, as_geo=True).loc[lambda x: x["stop_id"].isin(stop_ids)]
 
     return hp.drop_feature_ids(json.loads(g.to_json()))
 
@@ -640,7 +676,7 @@ def get_stops_in_area(
     within the given GeoDataFrame of polygons.
     """
     return (
-        gpd.sjoin(get_stops(feed, as_gdf=True), area.to_crs(cs.WGS84))
+        gpd.sjoin(get_stops(feed, as_geo=True), area.to_crs(cs.WGS84))
         .filter(["stop_id"])
         .merge(feed.stops)
     )

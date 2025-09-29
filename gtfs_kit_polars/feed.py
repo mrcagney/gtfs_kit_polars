@@ -197,7 +197,6 @@ class Feed(object):
                 else:
                     setattr(self, prop, val)
 
-
     @property
     def dist_units(self):
         """
@@ -311,6 +310,15 @@ class Feed(object):
             basename = str(path.parent / path.stem)
             shutil.make_archive(basename, format="zip", root_dir=tmp_dir.name)
             tmp_dir.cleanup()
+
+    def close_tmp(self: "Feed") -> None:
+        """
+        Close this Feed's temporary directory (to free memory),
+        if it has one, that is, if it was created by reading from a ZIP file.
+        """
+        if hasattr(self, "_tmp_dir") and self._tmp_dir is not None:
+            self._tmp_dir.cleanup()
+            self._tmp_dir = None
 
 
 # -------------------------------------
@@ -453,12 +461,3 @@ def read_feed(path_or_url: pb.Path | str, dist_units: str) -> "Feed":
         return _read_feed_from_url(str(path_or_url), dist_units=dist_units)
     else:
         raise ValueError("Path does not exist or URL has bad status.")
-
-    def close_tmp(self: "Feed") -> None:
-        """
-        Close this Feed's temporary directory (to free memory),
-        if it has one, that is, if it was created by reading from a ZIP file.
-        """
-        if hasattr(self, "_tmp_dir") and self._tmp_dir is not None:
-            self._tmp_dir.cleanup()
-            self._tmp_dir = None

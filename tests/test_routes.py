@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gtfs_kit_next import constants as cs
-from gtfs_kit_next import routes as gkr
+from gtfs_kit_polars import constants as cs
+from gtfs_kit_polars import routes as gkr
 
 from .context import (
     DATA_DIR,
@@ -15,10 +15,10 @@ from .context import (
     cairns_dates,
     cairns_shapeless,
     cairns_trip_stats,
-    gtfs_kit_next,
+    gtfs_kit_polars,
 )
 
-sample = gtfs_kit_next.read_feed(DATA_DIR / "sample_gtfs_2.zip", dist_units="km")
+sample = gtfs_kit_polars.read_feed(DATA_DIR / "sample_gtfs_2.zip", dist_units="km")
 
 
 def test_get_routes():
@@ -40,11 +40,11 @@ def test_get_routes():
 
     # Test GDF options
     feed = cairns.copy()
-    g = gkr.get_routes(feed, as_gdf=True, use_utm=True)
+    g = gkr.get_routes(feed, as_geo=True, use_utm=True)
     assert isinstance(g, gpd.GeoDataFrame)
     assert g.crs != cs.WGS84
 
-    g = gkr.get_routes(feed, as_gdf=True, split_directions=True)
+    g = gkr.get_routes(feed, as_geo=True, split_directions=True)
     assert g.crs == cs.WGS84
     assert (
         g.shape[0]
@@ -52,10 +52,10 @@ def test_get_routes():
     )
 
     with pytest.raises(ValueError):
-        gkr.get_routes(cairns_shapeless, as_gdf=True)
+        gkr.get_routes(cairns_shapeless, as_geo=True)
 
     # Test written by Gilles Cuyaubere
-    feed = gtfs_kit_next.Feed(dist_units="km")
+    feed = gtfs_kit_polars.Feed(dist_units="km")
     feed.agency = pd.DataFrame(
         {"agency_id": ["agency_id_0"], "agency_name": ["agency_name_0"]}
     )
@@ -122,7 +122,7 @@ def test_get_routes():
         }
     )
 
-    g = gkr.get_routes(feed, as_gdf=True)
+    g = gkr.get_routes(feed, as_geo=True)
     assert g.crs == cs.WGS84
 
     # Turning a route's shapes into point geometries,
@@ -135,7 +135,7 @@ def test_get_routes():
     f1 = feed.shapes.loc[lambda x: ~x["shape_id"].isin(shids)]
     feed.shapes = pd.concat([f0, f1])
     assert (
-        feed.get_routes(as_gdf=True)
+        feed.get_routes(as_geo=True)
         .loc[lambda x: x["route_id"] == rid, "geometry"]
         .iat[0]
         is None

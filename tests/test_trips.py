@@ -5,18 +5,18 @@ import geopandas as gpd
 import folium as fl
 
 from .context import (
-    gtfs_kit_next,
+    gtfs_kit_polars,
     DATA_DIR,
     cairns,
     cairns_shapeless,
     cairns_dates,
     cairns_trip_stats,
 )
-from gtfs_kit_next import constants as cs
-from gtfs_kit_next import trips as gkt
-from gtfs_kit_next import calendar as gkc
-from gtfs_kit_next import helpers as gkh
-from gtfs_kit_next import stop_times as gks
+from gtfs_kit_polars import constants as cs
+from gtfs_kit_polars import trips as gkt
+from gtfs_kit_polars import calendar as gkc
+from gtfs_kit_polars import helpers as gkh
+from gtfs_kit_polars import stop_times as gks
 
 
 def test_get_active_services():
@@ -56,13 +56,13 @@ def test_get_trips():
     assert set(trips2.columns) == set(feed.trips.columns)
 
     feed = cairns.copy()
-    g = gkt.get_trips(feed, as_gdf=True)
+    g = gkt.get_trips(feed, as_geo=True)
     assert g.crs == cs.WGS84
     assert g.shape[0] == feed.trips.shape[0]
     assert set(g.columns) == set(feed.trips.columns) | {"geometry"}
 
     with pytest.raises(ValueError):
-        gkt.get_trips(cairns_shapeless, as_gdf=True)
+        gkt.get_trips(cairns_shapeless, as_geo=True)
 
 
 def test_compute_trip_activity():

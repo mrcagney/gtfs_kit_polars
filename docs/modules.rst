@@ -1,7 +1,7 @@
 Module constants
 ===========================
 
-.. automodule:: gtfs_kit_next.constants
+.. automodule:: gtfs_kit_polars.constants
     :members:
     :undoc-members:
     :show-inheritance:
@@ -10,7 +10,7 @@ Module constants
 Module helpers
 ===========================
 
-.. automodule:: gtfs_kit_next.helpers
+.. automodule:: gtfs_kit_polars.helpers
     :members:
     :undoc-members:
     :show-inheritance:
@@ -19,7 +19,7 @@ Module helpers
 Module cleaners
 ===========================
 
-.. automodule:: gtfs_kit_next.cleaners
+.. automodule:: gtfs_kit_polars.cleaners
     :members:
     :undoc-members:
     :show-inheritance:
@@ -28,7 +28,7 @@ Module cleaners
 Module calendar
 ===========================
 
-.. automodule:: gtfs_kit_next.calendar
+.. automodule:: gtfs_kit_polars.calendar
     :members:
     :undoc-members:
     :show-inheritance:
@@ -37,7 +37,7 @@ Module calendar
 Module routes
 ===========================
 
-.. automodule:: gtfs_kit_next.routes
+.. automodule:: gtfs_kit_polars.routes
     :members:
     :undoc-members:
     :show-inheritance:
@@ -46,7 +46,7 @@ Module routes
 Module shapes
 ===========================
 
-.. automodule:: gtfs_kit_next.shapes
+.. automodule:: gtfs_kit_polars.shapes
     :members:
     :undoc-members:
     :show-inheritance:
@@ -55,7 +55,7 @@ Module shapes
 Module stop_times
 ===========================
 
-.. automodule:: gtfs_kit_next.stop_times
+.. automodule:: gtfs_kit_polars.stop_times
     :members:
     :undoc-members:
     :show-inheritance:
@@ -64,7 +64,7 @@ Module stop_times
 Module stops
 ===========================
 
-.. automodule:: gtfs_kit_next.stops
+.. automodule:: gtfs_kit_polars.stops
     :members:
     :undoc-members:
     :show-inheritance:
@@ -73,7 +73,7 @@ Module stops
 Module trips
 ===========================
 
-.. automodule:: gtfs_kit_next.trips
+.. automodule:: gtfs_kit_polars.trips
     :members:
     :undoc-members:
     :show-inheritance:
@@ -82,7 +82,7 @@ Module trips
 Module miscellany
 ===========================
 
-.. automodule:: gtfs_kit_next.miscellany
+.. automodule:: gtfs_kit_polars.miscellany
     :members:
     :undoc-members:
     :show-inheritance:
@@ -91,7 +91,7 @@ Module miscellany
 Module feed
 ===========================
 
-.. automodule:: gtfs_kit_next.feed
+.. automodule:: gtfs_kit_polars.feed
     :members:
     :undoc-members:
     :show-inheritance:

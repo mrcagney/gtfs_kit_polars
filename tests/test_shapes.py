@@ -3,9 +3,9 @@ import json
 import geopandas as gpd
 import shapely.geometry as sg
 
-from .context import gtfs_kit_next, DATA_DIR, cairns, cairns_shapeless
-from gtfs_kit_next import shapes as gks
-from gtfs_kit_next import constants as cs
+from .context import gtfs_kit_polars, DATA_DIR, cairns, cairns_shapeless
+from gtfs_kit_polars import shapes as gks
+from gtfs_kit_polars import constants as cs
 
 
 def test_append_dist_to_shapes():
@@ -69,15 +69,15 @@ def test_ungeometrize_shapes():
 
 
 def test_get_shapes():
-    g = gks.get_shapes(cairns, as_gdf=True)
+    g = gks.get_shapes(cairns, as_geo=True)
     assert g.crs == cs.WGS84
     assert set(g.columns) == {"shape_id", "geometry"}
-    assert gks.get_shapes(cairns_shapeless, as_gdf=True) is None
+    assert gks.get_shapes(cairns_shapeless, as_geo=True) is None
 
 
 def test_split_simple():
     m = 7
-    shapes_g = gks.get_shapes(cairns, as_gdf=True, use_utm=True).iloc[:20]
+    shapes_g = gks.get_shapes(cairns, as_geo=True, use_utm=True).iloc[:20]
     s = gks.split_simple(shapes_g, segmentize_m=m)
     assert set(s.columns) == {
         "shape_id",
@@ -136,7 +136,7 @@ def test_get_shapes_intersecting_geometry():
     pshapes = gks.get_shapes_intersecting_geometry(feed, polygon)
     shape_ids = ["120N0005", "1200010", "1200001"]
     assert set(pshapes["shape_id"].unique()) == set(shape_ids)
-    g = gks.get_shapes_intersecting_geometry(feed, polygon, as_gdf=True)
+    g = gks.get_shapes_intersecting_geometry(feed, polygon, as_geo=True)
     assert g.crs == "epsg:4326"
     assert set(g["shape_id"].unique()) == set(shape_ids)
     assert gks.get_shapes_intersecting_geometry(cairns_shapeless, polygon) is None

@@ -60,6 +60,7 @@ def get_dates(feed: "Feed", *, as_date_obj: bool = False) -> list[str]:
 
     return result
 
+
 def get_week(feed: "Feed", k: int, *, as_date_obj: bool = False) -> list[str]:
     """
     Given a Feed and a positive integer ``k``,

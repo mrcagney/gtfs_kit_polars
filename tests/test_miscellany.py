@@ -5,16 +5,16 @@ import pytest
 import shapely.geometry as sg
 from pandas.testing import assert_series_equal
 
-from gtfs_kit_next import constants as gkc
-from gtfs_kit_next import miscellany as gkm
-from gtfs_kit_next import shapes as gks
+from gtfs_kit_polars import constants as gkc
+from gtfs_kit_polars import miscellany as gkm
+from gtfs_kit_polars import shapes as gks
 
 from .context import (
     DATA_DIR,
     cairns,
     cairns_dates,
     cairns_trip_stats,
-    gtfs_kit_next,
+    gtfs_kit_polars,
     nyc_subway,
     sample,
 )

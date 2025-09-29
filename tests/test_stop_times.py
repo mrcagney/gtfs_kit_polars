@@ -2,8 +2,15 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from .context import gtfs_kit_next, DATA_DIR, sample, cairns, cairns_dates, cairns_trip_stats
-from gtfs_kit_next import stop_times as gks
+from .context import (
+    gtfs_kit_polars,
+    DATA_DIR,
+    sample,
+    cairns,
+    cairns_dates,
+    cairns_trip_stats,
+)
+from gtfs_kit_polars import stop_times as gks
 
 
 def test_get_stop_times():

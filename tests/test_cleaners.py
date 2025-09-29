@@ -2,10 +2,10 @@ import numpy as np
 import pytest
 from pandas.testing import assert_frame_equal, assert_series_equal
 
-from gtfs_kit_next import cleaners as gkc
-from gtfs_kit_next import helpers as hp
+from gtfs_kit_polars import cleaners as gkc
+from gtfs_kit_polars import helpers as hp
 
-from .context import gtfs_kit_next, sample
+from .context import gtfs_kit_polars, sample
 
 
 def test_clean_column_names():

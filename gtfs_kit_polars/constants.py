@@ -40,11 +40,11 @@ DTYPES = {
         "saturday": pl.Int8,
         "sunday": pl.Int8,
         "start_date": pl.Utf8,  # YYYYMMDD
-        "end_date": pl.Utf8,    # YYYYMMDD
+        "end_date": pl.Utf8,  # YYYYMMDD
     },
     "calendar_dates": {
         "service_id": pl.Utf8,
-        "date": pl.Utf8,            # YYYYMMDD
+        "date": pl.Utf8,  # YYYYMMDD
         "exception_type": pl.Int8,
     },
     "fare_attributes": {
@@ -67,13 +67,13 @@ DTYPES = {
         "feed_publisher_url": pl.Utf8,
         "feed_lang": pl.Utf8,
         "feed_start_date": pl.Utf8,  # YYYYMMDD
-        "feed_end_date": pl.Utf8,    # YYYYMMDD
+        "feed_end_date": pl.Utf8,  # YYYYMMDD
         "feed_version": pl.Utf8,
     },
     "frequencies": {
         "trip_id": pl.Utf8,
-        "start_time": pl.Utf8,   # HH:MM:SS (may exceed 24h)
-        "end_time": pl.Utf8,     # HH:MM:SS (may exceed 24h)
+        "start_time": pl.Utf8,  # HH:MM:SS (may exceed 24h)
+        "end_time": pl.Utf8,  # HH:MM:SS (may exceed 24h)
         "headway_secs": pl.Int16,
         "exact_times": pl.Int8,
     },
@@ -97,8 +97,8 @@ DTYPES = {
     },
     "stop_times": {
         "trip_id": pl.Utf8,
-        "arrival_time": pl.Utf8,     # HH:MM:SS (may exceed 24h)
-        "departure_time": pl.Utf8,   # HH:MM:SS (may exceed 24h)
+        "arrival_time": pl.Utf8,  # HH:MM:SS (may exceed 24h)
+        "departure_time": pl.Utf8,  # HH:MM:SS (may exceed 24h)
         "stop_id": pl.Utf8,
         "stop_sequence": pl.Int32,
         "stop_headsign": pl.Utf8,
@@ -164,7 +164,7 @@ FEED_ATTRS = [
 ]
 
 #: WGS84 coordinate reference system (used by spatial ops)
-WGS84 = "EPSG:4326"
+WGS84 = 4326
 
 #: Colorbrewer 8-class Set2 colors
 COLORS_SET2 = [
@@ -177,4 +177,3 @@ COLORS_SET2 = [
     "#e5c494",
     "#b3b3b3",
 ]
-

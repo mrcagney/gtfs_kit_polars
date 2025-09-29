@@ -11,7 +11,7 @@ Authors
 
 Installation
 =============
-Install it from PyPI with UV, say, via ``uv add gtfs_kit_next``.
+Install it from PyPI with UV, say, via ``uv add gtfs_kit_polars``.
 
 
 Examples

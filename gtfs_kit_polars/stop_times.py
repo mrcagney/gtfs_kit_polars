@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Iterable, TYPE_CHECKING
 import json
 
+import polars as pl
 import pandas as pd
 import numpy as np
 
@@ -16,19 +17,18 @@ if TYPE_CHECKING:
     from .feed import Feed
 
 
-def get_stop_times(feed: "Feed", date: str | None = None) -> pd.DataFrame:
+def get_stop_times(feed: "Feed", date: str | None = None) -> pl.LazyFrame:
     """
     Return ``feed.stop_times``.
     If a date (YYYYMMDD date string) is given, then subset the result to only those
     stop times with trips active on the date.
     """
     if date is None:
-        f = feed.stop_times.copy()
+        st = feed.stop_times
     else:
-        trip_ids = feed.get_trips(date).trip_id
-        f = feed.stop_times.loc[lambda x: x.trip_id.isin(trip_ids)].copy()
+        st = feed.stop_times.join(feed.get_trips(date), on="trip_id", how="semi")
 
-    return f
+    return st
 
 
 def append_dist_to_stop_times(feed: "Feed") -> "Feed":
@@ -178,7 +178,7 @@ def stop_times_to_geojson(
     st = feed.stop_times.loc[lambda x: x.trip_id.isin(trip_ids)]
 
     g = (
-        get_stops(feed, as_gdf=True)
+        get_stops(feed, as_geo=True)
         .loc[lambda x: x["stop_id"].isin(st["stop_id"].unique())]
         .merge(st)
         .sort_values(["trip_id", "stop_sequence"])

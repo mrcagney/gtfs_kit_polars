@@ -22,7 +22,7 @@ import shapely.geometry as sg
 from . import constants as cs
 
 
-def are_equal(f: pl.DataFrame|pl.LazyFrame, g: pl.DataFrame|pl.LazyFrame) -> bool:
+def are_equal(f: pl.DataFrame | pl.LazyFrame, g: pl.DataFrame | pl.LazyFrame) -> bool:
     """
     Return True if and only if the tables are equal after sorting column names
     and sorting rows by all columns.
@@ -44,15 +44,57 @@ def are_equal(f: pl.DataFrame|pl.LazyFrame, g: pl.DataFrame|pl.LazyFrame) -> boo
     G = G.select(cols).sort(cols)
     return F.equals(G, null_equal=True)
 
-def is_empty(f: pl.DataFrame|pl.LazyDataFrame) -> bool:
+
+def is_empty(f: pl.DataFrame | pl.LazyDataFrame) -> bool:
     try:
         return f.is_empty()
     except AttributeError:
         return f.limit(1).collect().is_empty()
 
-def get_utm_srid(lon, lat):
+
+def get_srid(g: pl.DataFrame | pl.LazyFrame) -> int:
+    """
+    Table version of the Polars ST function ``srid``.
+    """
+    g = g.lazy() if isinstance(g, pl.DataFrame) else g
+    return g.limit(1).select(srid=pl.col("geometry").st.srid()).collect().row(0)[0]
+
+
+def get_utm_srid_0(lon, lat):
+    """
+    Given the WGS84 longitude and latitude of a point, return its UTM SRID.
+    """
     _, _, znum, zlet = utm.from_latlon(lat, lon)
     return (32600 if zlet >= "N" else 32700) + int(znum)
+
+
+def get_utm_srid(g: pl.DataFrame | pl.LazyFrame) -> int:
+    """
+    Get the UTM SRID for the given geotable.
+    """
+    g = g.lazy() if isinstance(g, pl.DataFrame) else g
+    lon, lat = (
+        g.limit(1)
+        .select(geometry=pl.col("geometry").st.to_srid(cs.WGS84).st.coordinates())
+        .collect()
+        .row(0)[0][0]
+    )
+    return get_utm_srid_0(lon, lat)
+
+
+def to_srid(g: pl.DataFrame | pl.LazyFrame, srid: int) -> pl.DataFrame | pl.LazyFrame:
+    """
+    Table version of the Polars ST function ``to_srid``.
+    """
+    return g.with_columns(geometry=pl.col("geometry").st.to_srid(srid))
+
+
+def to_wkt(g: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
+    """
+    Table version of the Polars ST function ``to_wkt``.
+    """
+    return g.with_columns(geometry=pl.col("geometry").st.to_wkt())
+
 
 def datestr_to_date(x: str | None, format_str: str = "%Y%m%d") -> dt.date | None:
     """
@@ -259,7 +301,6 @@ def get_convert_dist(
         "km": {"ft": 1 / 0.000_304_8, "m": 1000, "mi": 1 / 1.609_344, "km": 1},
     }
     return lambda x: d[di][do] * x
-
 
 
 def is_not_null(df: pd.DataFrame, col_name: str) -> bool:

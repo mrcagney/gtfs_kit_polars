@@ -8,12 +8,12 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from gtfs_kit_next import calendar as gkc
-from gtfs_kit_next import stops as gks
+from gtfs_kit_polars import calendar as gkc
+from gtfs_kit_polars import stops as gks
 
-from .context import DATA_DIR, cairns, cairns_dates, gtfs_kit_next
+from .context import DATA_DIR, cairns, cairns_dates, gtfs_kit_polars
 
-sample = gtfs_kit_next.read_feed(DATA_DIR / "sample_gtfs_2.zip", dist_units="km")
+sample = gtfs_kit_polars.read_feed(DATA_DIR / "sample_gtfs_2.zip", dist_units="km")
 
 
 def test_get_stops():
@@ -43,11 +43,11 @@ def test_get_stops():
     assert frames[2].shape[0] <= frames[4].shape[0]
     assert frames[4].shape == frames[6].shape
 
-    g = gks.get_stops(feed, as_gdf=True)
+    g = gks.get_stops(feed, as_geo=True)
     assert isinstance(g, gpd.GeoDataFrame)
     assert g.crs == "epsg:4326"
 
-    g = gks.get_stops(feed, as_gdf=True, use_utm=True)
+    g = gks.get_stops(feed, as_geo=True, use_utm=True)
     assert isinstance(g, gpd.GeoDataFrame)
     assert g.crs != "epsg:4326"
 

@@ -75,7 +75,7 @@ def get_routes(
     date: str | None = None,
     time: str | None = None,
     *,
-    as_gdf: bool = False,
+    as_geo: bool = False,
     use_utm: bool = False,
     split_directions: bool = False,
 ) -> pd.DataFrame:
@@ -90,23 +90,23 @@ def get_routes(
     plus a geometry column of (Multi)LineStrings, each of which represents the
     corresponding routes's shape.
 
-    If ``as_gdf`` and ``feed.shapes`` is not ``None``,
+    If ``as_geo`` and ``feed.shapes`` is not ``None``,
     then return a GeoDataFrame with all the columns of ``feed.routes``
     plus a geometry column of (Multi)LineStrings, each of which represents the
     corresponding routes's union of trip shapes.
     The GeoDataFrame will have a local UTM CRS if ``use_utm``; otherwise it will have
     CRS WGS84.
-    If ``split_directions`` and ``as_gdf``, then add the column ``direction_id`` and
+    If ``split_directions`` and ``as_geo``, then add the column ``direction_id`` and
     split each route into the union of its direction 0 shapes
     and the union of its direction 1 shapes.
-    If ``as_gdf`` and ``feed.shapes`` is ``None``, then raise a ValueError.
+    If ``as_geo`` and ``feed.shapes`` is ``None``, then raise a ValueError.
     """
     from .trips import get_trips
 
-    trips = get_trips(feed, date=date, time=time, as_gdf=as_gdf, use_utm=use_utm)
+    trips = get_trips(feed, date=date, time=time, as_geo=as_geo, use_utm=use_utm)
     f = feed.routes[lambda x: x["route_id"].isin(trips["route_id"])]
 
-    if as_gdf:
+    if as_geo:
         if feed.shapes is None:
             raise ValueError("This Feed has no shapes.")
 
@@ -176,7 +176,7 @@ def routes_to_geojson(
         raise ValueError(f"Route IDs {D} not found in feed.")
 
     # Get routes
-    g = get_routes(feed, as_gdf=True, split_directions=split_directions).loc[
+    g = get_routes(feed, as_geo=True, split_directions=split_directions).loc[
         lambda x: x["route_id"].isin(route_ids)
     ]
     collection = json.loads(g.to_json())
