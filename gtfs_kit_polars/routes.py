@@ -8,6 +8,8 @@ import json
 from typing import TYPE_CHECKING, Iterable
 
 import folium as fl
+import polars as pl
+import polars_st as st
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -288,22 +290,23 @@ def map_routes(
 
 
 def compute_route_stats_0(
-    trip_stats: pd.DataFrame,
+    trip_stats: pl.DataFrame | pl.LazyFrame,
     headway_start_time: str = "07:00:00",
     headway_end_time: str = "19:00:00",
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
-    Compute stats for the given subset of trips stats of the form output by the
-    function :func:`.trips.compute_trip_stats`.
-    Ignore trips with zero duration.
+    Compute stats for the given subset of trip stats (of the form output by the
+    function :func:`.trips.compute_trip_stats`).
+
+    Ignore trips with zero duration, because they are defunct.
 
     If ``split_directions``, then separate the stats by trip direction (0 or 1).
     Use the headway start and end times to specify the time period for computing
     headway stats.
 
-    Return a DataFrame with the columns
+    Return a table with the columns
 
     - ``'route_id'``
     - ``'route_short_name'``
@@ -343,200 +346,206 @@ def compute_route_stats_0(
       measured in kilometers if ``feed.dist_units`` is metric;
       otherwise measured in miles;
       contains all ``np.nan`` entries if ``feed.shapes is None``
-    - ``'service_speed'``: service_distance/service_duration when defined; 0 otherwise
+    - ``'service_speed'``: service_distance/service_duration
     - ``'mean_trip_distance'``: service_distance/num_trips
     - ``'mean_trip_duration'``: service_duration/num_trips
 
-    If ``trip_stats`` is empty, return an empty DataFrame.
+    If ``trip_stats`` is empty, return an empty table.
 
-    If not ``split_directions``, then compute each route's stats,
-    except for headways, using its trips running in both directions.
-    For headways, (1) compute max headway by taking the max of the
-    max headways in both directions; (2) compute mean headway by
-    taking the weighted mean of the mean headways in both
-    directions.
-
-    Raise a ValueError if ``split_directions`` and no non-null
-    direction ID values present.
+    Raise a ValueError if ``split_directions`` and no non-NaN
+    direction ID values present
     """
-    final_cols = [
-        "route_id",
-        "route_short_name",
-        "route_type",
-        "num_trips",
-        "num_trip_starts",
-        "num_trip_ends",
-        "num_stop_patterns",
-        "is_loop",
-        "start_time",  # HH:MM:SS
-        "end_time",  # HH:MM:SS
-        "max_headway",  # minutes
-        "min_headway",  # minutes
-        "mean_headway",  # minutes
-        "peak_num_trips",
-        "peak_start_time",  # HH:MM:SS
-        "peak_end_time",  # HH:MM:SS
-        "service_distance",
-        "service_duration",  # hours
-        "service_speed",
-        "mean_trip_distance",
-        "mean_trip_duration",
-    ]
-    if split_directions:
-        final_cols.append("direction_id")
-    else:
-        final_cols.append("is_bidirectional")
-
-    null_stats = pd.DataFrame(data=[], columns=final_cols)
+    # Coerce trip stats to LazyFrame
+    f = trip_stats if isinstance(trip_stats, pl.LazyFrame) else trip_stats.lazy()
 
     # Handle defunct case
-    if trip_stats.is_empty():
-        return null_stats
-
-    # Remove defunct trips
-    f = trip_stats.loc[lambda x: x["duration"] > 0].copy()
-
-    # Convert trip start and end times to seconds to ease calculations below
-    f[["start_time", "end_time"]] = f[["start_time", "end_time"]].map(
-        hp.timestr_to_seconds
-    )
-
-    headway_start = hp.timestr_to_seconds(headway_start_time)
-    headway_end = hp.timestr_to_seconds(headway_end_time)
-
-    def agg_sd(group):
-        # Take this group of all trips stats for a single route
-        # and compute route-level stats.
-        d = dict()
-        d["route_short_name"] = group["route_short_name"].iat[0]
-        d["route_type"] = group["route_type"].iat[0]
-        d["num_trips"] = group.shape[0]
-        d["num_trip_starts"] = group["start_time"].count()
-        d["num_trip_ends"] = group.loc[
-            group["end_time"] < 24 * 3600, "end_time"
-        ].count()
-        d["num_stop_patterns"] = group["stop_pattern_name"].nunique()
-        d["is_loop"] = int(group["is_loop"].any())
-        d["start_time"] = group["start_time"].min()
-        d["end_time"] = group["end_time"].max()
-
-        # Compute max and mean headway
-        stimes = group["start_time"].values
-        stimes = sorted(
-            [stime for stime in stimes if headway_start <= stime <= headway_end]
-        )
-        headways = np.diff(stimes)
-        if headways.size:
-            d["max_headway"] = np.max(headways) / 60  # minutes
-            d["min_headway"] = np.min(headways) / 60  # minutes
-            d["mean_headway"] = np.mean(headways) / 60  # minutes
-        else:
-            d["max_headway"] = np.nan
-            d["min_headway"] = np.nan
-            d["mean_headway"] = np.nan
-
-        # Compute peak num trips
-        active_trips = hp.get_active_trips_df(group[["start_time", "end_time"]])
-        times, counts = active_trips.index.values, active_trips.values
-        start, end = hp.get_peak_indices(times, counts)
-        d["peak_num_trips"] = counts[start]
-        d["peak_start_time"] = times[start]
-        d["peak_end_time"] = times[end]
-
-        d["service_distance"] = group["distance"].sum()
-        d["service_duration"] = group["duration"].sum()
-
-        return pd.Series(d)
-
-    def agg(group):
-        d = dict()
-        d["route_short_name"] = group["route_short_name"].iat[0]
-        d["route_type"] = group["route_type"].iat[0]
-        d["num_trips"] = group.shape[0]
-        d["num_trip_starts"] = group["start_time"].count()
-        d["num_trip_ends"] = group.loc[
-            group["end_time"] < 24 * 3600, "end_time"
-        ].count()
-        d["num_stop_patterns"] = group["stop_pattern_name"].nunique()
-        d["is_loop"] = int(group["is_loop"].any())
-        d["is_bidirectional"] = int(group["direction_id"].unique().size > 1)
-        d["start_time"] = group["start_time"].min()
-        d["end_time"] = group["end_time"].max()
-
-        # Compute headway stats
-        headways = np.array([])
-        for direction in [0, 1]:
-            stimes = group[group["direction_id"] == direction]["start_time"].values
-            stimes = sorted(
-                [stime for stime in stimes if headway_start <= stime <= headway_end]
-            )
-            headways = np.concatenate([headways, np.diff(stimes)])
-        if headways.size:
-            d["max_headway"] = np.max(headways) / 60  # minutes
-            d["min_headway"] = np.min(headways) / 60  # minutes
-            d["mean_headway"] = np.mean(headways) / 60  # minutes
-        else:
-            d["max_headway"] = np.nan
-            d["min_headway"] = np.nan
-            d["mean_headway"] = np.nan
-
-        # Compute peak num trips
-        active_trips = hp.get_active_trips_df(group[["start_time", "end_time"]])
-        times, counts = active_trips.index.values, active_trips.values
-        start, end = hp.get_peak_indices(times, counts)
-        d["peak_num_trips"] = counts[start]
-        d["peak_start_time"] = times[start]
-        d["peak_end_time"] = times[end]
-
-        d["service_distance"] = group["distance"].sum()
-        d["service_duration"] = group["duration"].sum()
-
-        return pd.Series(d)
-
+    schema = {
+        "route_id": pl.Utf8,
+        "route_short_name": pl.Utf8,
+        "route_type": pl.Int32,
+        "num_trips": pl.Int32,
+        "num_trip_starts": pl.Int32,
+        "num_trip_ends": pl.Int32,
+        "num_stop_patterns": pl.Int32,
+        "is_loop": pl.Boolean,
+        "start_time": pl.Utf8,
+        "end_time": pl.Utf8,
+        "max_headway": pl.Float64,
+        "min_headway": pl.Float64,
+        "mean_headway": pl.Float64,
+        "peak_num_trips": pl.Int32,
+        "peak_start_time": pl.Utf8,
+        "peak_end_time": pl.Utf8,
+        "service_distance": pl.Float64,
+        "service_duration": pl.Float64,
+        "service_speed": pl.Float64,
+        "mean_trip_distance": pl.Float64,
+        "mean_trip_duration": pl.Float64,
+    }
+    final_cols = list(schema.keys())
     if split_directions:
-        f = f.loc[lambda x: x.direction_id.notnull()].assign(
-            direction_id=lambda x: x.direction_id.astype(int)
-        )
-        if f.is_empty():
-            raise ValueError(
-                "At least one trip stats direction ID value must be non-NaN."
-            )
-
-        g = (
-            f.groupby(["route_id", "direction_id"])
-            .apply(agg_sd, include_groups=False)
-            .reset_index()
-        )
+        schema |= {"direction_id": pl.Int32}
+        final_cols.insert(1, "direction_id")
     else:
-        g = f.groupby("route_id").apply(agg, include_groups=False).reset_index()
+        schema |= {"is_bidirectional": pl.Boolean}
+        final_cols.insert(1, "is_bidirectional")
 
-    # Compute a few more stats
-    g["service_speed"] = (
-        g["service_distance"]
-        .div(g["service_duration"])
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(0.0)
+    if hp.is_empty(f):
+        return pl.LazyFrame(schema=schema)
+
+    # Handle generic case
+    if split_directions:
+        if "direction_id" not in f.collect_schema().names():
+            f = f.with_columns(pl.lit(None, dtype=pl.Int32).alias("direction_id"))
+        has_dir = f.select(pl.col("direction_id").is_not_null().any()).collect().item()
+        if not has_dir:
+            raise ValueError(
+                "At least one trip stats direction ID value must be non-NULL."
+            )
+        group_cols = ["route_id", "direction_id"]
+    else:
+        group_cols = ["route_id"]
+
+    # Prepare trips subset
+    needed_cols = group_cols + [
+        "trip_id",
+        "route_short_name",
+        "route_type",
+        "start_time",
+        "end_time",
+        "duration",
+        "distance",
+        "stop_pattern_name",
+        "is_loop",
+    ]
+    if (
+        "direction_id" not in group_cols
+        and "direction_id" in f.collect_schema().names()
+    ):
+        needed_cols.append("direction_id")
+
+    f = (
+        f.filter(pl.col("duration") > 0)
+        .select(needed_cols)
+        .with_columns(
+            start_s=hp.timestr_to_seconds("start_time"),
+            end_s=hp.timestr_to_seconds("end_time"),
+        )
     )
-    g["mean_trip_distance"] = g["service_distance"] / g["num_trips"]
-    g["mean_trip_duration"] = g["service_duration"] / g["num_trips"]
+    if split_directions:
+        f = f.filter(pl.col("direction_id").is_not_null()).with_columns(
+            pl.col("direction_id").cast(pl.Int32)
+        )
 
-    # Convert route times to time strings
-    g[["start_time", "end_time", "peak_start_time", "peak_end_time"]] = g[
-        ["start_time", "end_time", "peak_start_time", "peak_end_time"]
-    ].map(lambda x: hp.seconds_to_timestr(x))
+    # Compute basic stats
+    basic_stats = f.group_by(group_cols).agg(
+        route_short_name=pl.first("route_short_name"),
+        route_type=pl.first("route_type"),
+        num_trips=pl.len(),
+        num_trip_starts=pl.col("start_s").is_not_null().sum(),
+        num_trip_ends=pl.col("end_s").is_not_null().sum(),
+        num_stop_patterns=pl.col("stop_pattern_name").n_unique(),
+        is_loop=pl.col("is_loop").any(),
+        start_s_min=pl.col("start_s").min(),
+        end_s_max=pl.col("end_s").max(),
+        service_distance=pl.col("distance").sum(),
+        service_duration=pl.col("duration").sum(),
+        is_bidirectional=None
+        if split_directions
+        else (pl.col("direction_id").n_unique() > 1),
+    )
+    # Compute headway stats
+    h_start = hp.timestr_to_seconds_0(headway_start_time)
+    h_end = hp.timestr_to_seconds_0(headway_end_time)
+    headway_stats = (
+        f.filter(pl.col("start_s").is_between(h_start, h_end, closed="both"))
+        .select(group_cols + ["start_s"])
+        .sort(group_cols + ["start_s"])
+        .with_columns(
+            prev=pl.col("start_s").shift(1).over(group_cols),
+        )
+        .with_columns(
+            headway_m=(pl.col("start_s") - pl.col("prev")) / 60.0,
+        )
+        .filter(pl.col("headway_m").is_not_null())
+        .group_by(group_cols)
+        .agg(
+            max_headway=pl.col("headway_m").max(),
+            min_headway=pl.col("headway_m").min(),
+            mean_headway=pl.col("headway_m").mean(),
+        )
+    )
+    # Compute peak stats, the tricky part.
+    # Create events table with +1 for trip starts, -1 for trip ends
+    events = (
+        f.select(group_cols + ["start_s", "end_s"])
+        .unpivot(
+            index=group_cols,
+            on=["start_s", "end_s"],
+            variable_name="event_type",
+            value_name="t",
+        )
+        .filter(pl.col("t").is_not_null())
+        .with_columns(
+            delta=pl.when(pl.col("event_type") == "start_s").then(1).otherwise(-1)
+        )
+        .sort(
+            group_cols + ["t", "delta"],
+            descending=False,
+        )
+        # Get cumulative sum of all trips in service per time slot
+        .group_by(group_cols + ["t"], maintain_order=True)
+        .agg(
+            num_trip_starts=pl.col("delta").sum(),
+        )
+        .with_columns(num_trips=pl.col("num_trip_starts").cum_sum().over(group_cols))
+        .drop("num_trip_starts")
+    )
+    peak_vals = events.group_by(group_cols).agg(
+        peak_num_trips=pl.col("num_trips").max()
+    )
+    peak_periods = (
+        events.join(peak_vals, on=group_cols)
+        .with_columns(t_next=pl.col("t").shift(-1).over(group_cols))
+        .with_columns(duration=pl.col("t_next") - pl.col("t"))
+        .filter(pl.col("num_trips") == pl.col("peak_num_trips"))
+        .filter(pl.col("duration") == pl.max("duration").over(group_cols))
+        .sort(group_cols + ["t"])
+        .group_by(group_cols)
+        .agg(
+            peak_start_s=pl.first("t"),
+            peak_end_s=pl.first("t_next"),
+        )
+    )
+    peak_stats = peak_vals.join(peak_periods, group_cols, how="left")
 
-    return g.filter(final_cols)
+    # Collate stats
+    return (
+        basic_stats.join(headway_stats, on=group_cols, how="left")
+        .join(peak_stats, on=group_cols, how="left")
+        .with_columns(
+            start_time=hp.seconds_to_timestr("start_s_min"),
+            end_time=hp.seconds_to_timestr("end_s_max"),
+            peak_start_time=hp.seconds_to_timestr("peak_start_s"),
+            peak_end_time=hp.seconds_to_timestr("peak_end_s"),
+            service_speed=pl.col("service_distance")
+            / pl.col("service_duration").replace(0, None),
+            mean_trip_distance=pl.col("service_distance") / pl.col("num_trips"),
+            mean_trip_duration=pl.col("service_duration") / pl.col("num_trips"),
+        )
+        .select(final_cols)
+    )
 
 
 def compute_route_stats(
     feed: "Feed",
     dates: list[str],
-    trip_stats: pd.DataFrame | None = None,
+    trip_stats: pl.DataFrame | pl.LazyFrame | None = None,
     headway_start_time: str = "07:00:00",
     headway_end_time: str = "19:00:00",
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
     Compute route stats for all the trips that lie in the given subset
     of trip stats, which defaults to ``feed.compute_trip_stats()``,
@@ -615,7 +624,7 @@ def compute_route_stats(
     null_stats = compute_route_stats_0(
         feed.trips.head(0), split_directions=split_directions
     )
-    final_cols = ["date"] + list(null_stats.columns)
+    final_cols = ["date"] + list(null_stats.collect_schema().names())
     null_stats = null_stats.assign(date=None).filter(final_cols)
     dates = feed.subset_dates(dates)
 
@@ -625,6 +634,8 @@ def compute_route_stats(
 
     if trip_stats is None:
         trip_stats = feed.compute_trip_stats()
+    elif isinstance(trip_stats, pl.DataFrame):
+        trip_stats = trip_stats.lazy()
 
     # Collect stats for each date,
     # memoizing stats the sequence of trip IDs active on the date

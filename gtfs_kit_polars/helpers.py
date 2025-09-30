@@ -116,7 +116,7 @@ def date_to_datestr(x: dt.date | None, format_str: str = "%Y%m%d") -> str | None
     return x.strftime(format_str)
 
 
-def timestr_to_seconds(x: str, *, mod24: bool = False) -> int | np.nan:
+def timestr_to_seconds_0(x: str, *, mod24: bool = False) -> int | np.nan:
     """
     Given an HH:MM:SS time string ``x``, return the number of seconds
     past midnight that it represents.
@@ -135,7 +135,7 @@ def timestr_to_seconds(x: str, *, mod24: bool = False) -> int | np.nan:
     return result
 
 
-def seconds_to_timestr(x: int, *, mod24: bool = False) -> str | np.nan:
+def seconds_to_timestr_0(x: int, *, mod24: bool = False) -> str | np.nan:
     """
     The inverse of :func:`timestr_to_seconds`.
     If ``mod24``, then first take the number of seconds modulo ``24*3600``.
@@ -153,7 +153,7 @@ def seconds_to_timestr(x: int, *, mod24: bool = False) -> str | np.nan:
     return result
 
 
-def timestr_mod24(timestr: str) -> int | np.nan:
+def timestr_mod24_0(timestr: str) -> int | np.nan:
     """
     Given a GTFS HH:MM:SS time string, return a timestring in the same
     format but with the hours taken modulo 24.
@@ -167,7 +167,8 @@ def timestr_mod24(timestr: str) -> int | np.nan:
         result = np.nan
     return result
 
-def timestr_to_seconds_pl(col: str, *, mod24: bool = False) -> pl.Expr:
+
+def timestr_to_seconds(col: str, *, mod24: bool = False) -> pl.Expr:
     p = pl.col(col).str.split_exact(":", 3)
     h = p.struct.field("field_0").cast(pl.Int64)
     m = p.struct.field("field_1").cast(pl.Int64)
@@ -175,28 +176,34 @@ def timestr_to_seconds_pl(col: str, *, mod24: bool = False) -> pl.Expr:
     sec = h * 3600 + m * 60 + s
     return sec if not mod24 else (sec % (24 * 3600))
 
-def seconds_to_timestr_pl(col: str, *, mod24: bool = False) -> pl.Expr:
+
+def seconds_to_timestr(col: str, *, mod24: bool = False) -> pl.Expr:
     x = pl.col(col).cast(pl.Int64)
     if mod24:
         x = x % (24 * 3600)
-    hh = (x // 3600)
+    hh = x // 3600
     mm = (x % 3600) // 60
-    ss = (x % 60)
+    ss = x % 60
     return (
-        hh.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
-        mm.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
-        ss.cast(pl.Utf8).str.zfill(2)
+        hh.cast(pl.Utf8).str.zfill(2)
+        + pl.lit(":")
+        + mm.cast(pl.Utf8).str.zfill(2)
+        + pl.lit(":")
+        + ss.cast(pl.Utf8).str.zfill(2)
     )
 
-def timestr_mod24_pl(col: str) -> pl.Expr:
+
+def timestr_mod24(col: str) -> pl.Expr:
     p = pl.col(col).str.split_exact(":", 3)
-    h = (p.struct.field("field_0").cast(pl.Int64) % 24)
+    h = p.struct.field("field_0").cast(pl.Int64) % 24
     m = p.struct.field("field_1").cast(pl.Int64)
     s = p.struct.field("field_2").cast(pl.Int64)
     return (
-        h.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
-        m.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
-        s.cast(pl.Utf8).str.zfill(2)
+        h.cast(pl.Utf8).str.zfill(2)
+        + pl.lit(":")
+        + m.cast(pl.Utf8).str.zfill(2)
+        + pl.lit(":")
+        + s.cast(pl.Utf8).str.zfill(2)
     )
 
 
@@ -328,7 +335,7 @@ def get_convert_dist(dist_units_in: str, dist_units_out: str):
 
     d = {
         "ft": {"ft": 1, "m": 0.3048, "mi": 1 / 5280, "km": 0.000_304_8},
-        "m":  {"ft": 1 / 0.3048, "m": 1, "mi": 1 / 1609.344, "km": 1 / 1000},
+        "m": {"ft": 1 / 0.3048, "m": 1, "mi": 1 / 1609.344, "km": 1 / 1000},
         "mi": {"ft": 5280, "m": 1609.344, "mi": 1, "km": 1.609_344},
         "km": {"ft": 1 / 0.000_304_8, "m": 1000, "mi": 1 / 1.609_344, "km": 1},
     }
@@ -366,7 +373,7 @@ def get_convert_dist(dist_units_in: str, dist_units_out: str):
 #     return lambda x: d[di][do] * x
 
 
-def is_not_null(f: pl.DataFrame|pl.LazyFrame, col_name: str) -> bool:
+def is_not_null(f: pl.DataFrame | pl.LazyFrame, col_name: str) -> bool:
     """
     Return ``True`` if the given DataFrame has a column of the given
     name (string), and there exists at least one non-NaN value in that
@@ -375,7 +382,9 @@ def is_not_null(f: pl.DataFrame|pl.LazyFrame, col_name: str) -> bool:
     f = f.lazy() if isinstance(f, pl.DataFrame) else f
     if (
         col_name in f.collect_schema().names()
-        and f.select(bingo=pl.col("shape_dist_traveled").is_not_null().any()).collect().row(0)[0]
+        and f.select(bingo=pl.col("shape_dist_traveled").is_not_null().any())
+        .collect()
+        .row(0)[0]
     ):
         return True
     else:

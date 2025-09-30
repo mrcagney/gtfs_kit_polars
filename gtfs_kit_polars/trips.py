@@ -150,19 +150,19 @@ def compute_trip_activity(feed: "Feed", dates: list[str]) -> pd.DataFrame:
     """
     dates = feed.subset_dates(dates)
     if not dates:
-        return pd.DataFrame()
+        return pl.LazyFrame(schema={"trip_id": pl.Utf8})
 
     # Get trip activity table for each day
-    frames = [feed.trips[["trip_id"]]]
-    for date in dates:
-        frames.append(get_trips(feed, date)[["trip_id"]].assign(**{date: 1}))
+    frames = [feed.trips.select("trip_id")] + [
+        get_trips(feed, date).select("trip_id").with_columns(**{date: pl.lit(1)})
+        for date in dates
+    ]
 
-    # Merge daily trip activity tables into a single table
-    f = ft.reduce(lambda left, right: left.merge(right, how="outer"), frames).fillna(
-        {date: 0 for date in dates}
-    )
-    f[dates] = f[dates].astype(int)
-    return f
+    # Join daily trip activity tables into a single table
+    return ft.reduce(
+        lambda left, right: left.join(right, "trip_id", how="full", coalesce=True),
+        frames,
+    ).with_columns(pl.col(dates).fill_null(0).cast(pl.Int8))
 
 
 def compute_busiest_date(feed: "Feed", dates: list[str]) -> str:
@@ -314,7 +314,7 @@ def compute_trip_stats(
         )
         .join(feed.stop_times, on="trip_id")
         .sort("trip_id", "stop_sequence")
-        .with_columns(dtime=hp.timestr_to_seconds_pl("departure_time"))
+        .with_columns(dtime=hp.timestr_to_seconds("departure_time"))
     )
     # Compute most trip stats
     stops_g = feed.get_stops(as_geo=True, use_utm=True)
@@ -420,8 +420,8 @@ def compute_trip_stats(
         trip_stats.drop("start_geom", "end_geom")
         .with_columns(
             speed=pl.col("distance") / pl.col("duration"),
-            start_time=hp.seconds_to_timestr_pl("start_time"),
-            end_time=hp.seconds_to_timestr_pl("end_time"),
+            start_time=hp.seconds_to_timestr("start_time"),
+            end_time=hp.seconds_to_timestr("end_time"),
         )
         .sort("route_id", "direction_id", "start_time")
     )
