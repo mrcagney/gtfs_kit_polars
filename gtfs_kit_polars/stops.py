@@ -131,7 +131,7 @@ def get_stops(
 
     if in_stations:
         # Check if required columns exist
-        if {"location_type", "parent_station"} <= set(s.schema.names()):
+        if {"location_type", "parent_station"} <= set(s.collect_schema().names()):
             s = s.filter(
                 (pl.col("location_type") != 1) & ~pl.col("parent_station").is_null()
             )

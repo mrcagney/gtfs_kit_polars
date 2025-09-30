@@ -12,12 +12,12 @@ from bisect import bisect_left, bisect_right
 from functools import cmp_to_key
 from typing import Callable, Literal
 
-import utm
 import json2html as j2h
-import polars as pl
 import numpy as np
 import pandas as pd
+import polars as pl
 import shapely.geometry as sg
+import utm
 
 from . import constants as cs
 
@@ -167,6 +167,38 @@ def timestr_mod24(timestr: str) -> int | np.nan:
         result = np.nan
     return result
 
+def timestr_to_seconds_pl(col: str, *, mod24: bool = False) -> pl.Expr:
+    p = pl.col(col).str.split_exact(":", 3)
+    h = p.struct.field("field_0").cast(pl.Int64)
+    m = p.struct.field("field_1").cast(pl.Int64)
+    s = p.struct.field("field_2").cast(pl.Int64)
+    sec = h * 3600 + m * 60 + s
+    return sec if not mod24 else (sec % (24 * 3600))
+
+def seconds_to_timestr_pl(col: str, *, mod24: bool = False) -> pl.Expr:
+    x = pl.col(col).cast(pl.Int64)
+    if mod24:
+        x = x % (24 * 3600)
+    hh = (x // 3600)
+    mm = (x % 3600) // 60
+    ss = (x % 60)
+    return (
+        hh.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
+        mm.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
+        ss.cast(pl.Utf8).str.zfill(2)
+    )
+
+def timestr_mod24_pl(col: str) -> pl.Expr:
+    p = pl.col(col).str.split_exact(":", 3)
+    h = (p.struct.field("field_0").cast(pl.Int64) % 24)
+    m = p.struct.field("field_1").cast(pl.Int64)
+    s = p.struct.field("field_2").cast(pl.Int64)
+    return (
+        h.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
+        m.cast(pl.Utf8).str.zfill(2) + pl.lit(":") +
+        s.cast(pl.Utf8).str.zfill(2)
+    )
+
 
 def replace_date(f: pd.DataFrame, date: str) -> pd.DataFrame:
     """
@@ -278,16 +310,16 @@ def is_metric(dist_units: str) -> bool:
     return dist_units in ["m", "km"]
 
 
-def get_convert_dist(
-    dist_units_in: str, dist_units_out: str
-) -> Callable[[float], float]:
+def get_convert_dist(dist_units_in: str, dist_units_out: str):
     """
-    Return a function of the form
+    Return a *Polars expression builder* for distance conversion:
 
-      distance in the units ``dist_units_in`` ->
-      distance in the units ``dist_units_out``
+      expr_or_col -> expr * factor
 
-    Only supports distance units in :const:`constants.DIST_UNITS`.
+    Only supports units in :const:`constants.DIST_UNITS`.
+    Usage:
+        .with_columns(distance_km = get_convert_dist_pl("m","km")("distance_m"))
+        .with_columns(distance_mi = get_convert_dist_pl("km","mi")(pl.col("dist")))
     """
     di, do = dist_units_in, dist_units_out
     DU = cs.DIST_UNITS
@@ -296,23 +328,54 @@ def get_convert_dist(
 
     d = {
         "ft": {"ft": 1, "m": 0.3048, "mi": 1 / 5280, "km": 0.000_304_8},
-        "m": {"ft": 1 / 0.3048, "m": 1, "mi": 1 / 1609.344, "km": 1 / 1000},
+        "m":  {"ft": 1 / 0.3048, "m": 1, "mi": 1 / 1609.344, "km": 1 / 1000},
         "mi": {"ft": 5280, "m": 1609.344, "mi": 1, "km": 1.609_344},
         "km": {"ft": 1 / 0.000_304_8, "m": 1000, "mi": 1 / 1.609_344, "km": 1},
     }
-    return lambda x: d[di][do] * x
+    factor = d[di][do]
+
+    def builder(expr_or_col):
+        e = expr_or_col if isinstance(expr_or_col, pl.Expr) else pl.col(expr_or_col)
+        return (e.cast(pl.Float64) * pl.lit(factor)).cast(pl.Float64)
+
+    return builder
 
 
-def is_not_null(df: pd.DataFrame, col_name: str) -> bool:
+# def get_convert_dist(
+#     dist_units_in: str, dist_units_out: str
+# ) -> Callable[[float], float]:
+#     """
+#     Return a function of the form
+
+#       distance in the units ``dist_units_in`` ->
+#       distance in the units ``dist_units_out``
+
+#     Only supports distance units in :const:`constants.DIST_UNITS`.
+#     """
+#     di, do = dist_units_in, dist_units_out
+#     DU = cs.DIST_UNITS
+#     if not (di in DU and do in DU):
+#         raise ValueError(f"Distance units must lie in {DU}")
+
+#     d = {
+#         "ft": {"ft": 1, "m": 0.3048, "mi": 1 / 5280, "km": 0.000_304_8},
+#         "m": {"ft": 1 / 0.3048, "m": 1, "mi": 1 / 1609.344, "km": 1 / 1000},
+#         "mi": {"ft": 5280, "m": 1609.344, "mi": 1, "km": 1.609_344},
+#         "km": {"ft": 1 / 0.000_304_8, "m": 1000, "mi": 1 / 1.609_344, "km": 1},
+#     }
+#     return lambda x: d[di][do] * x
+
+
+def is_not_null(f: pl.DataFrame|pl.LazyFrame, col_name: str) -> bool:
     """
     Return ``True`` if the given DataFrame has a column of the given
     name (string), and there exists at least one non-NaN value in that
     column; return ``False`` otherwise.
     """
+    f = f.lazy() if isinstance(f, pl.DataFrame) else f
     if (
-        isinstance(df, pd.DataFrame)
-        and col_name in df.columns
-        and df[col_name].notnull().any()
+        col_name in f.collect_schema().names()
+        and f.select(bingo=pl.col("shape_dist_traveled").is_not_null().any()).collect().row(0)[0]
     ):
         return True
     else:

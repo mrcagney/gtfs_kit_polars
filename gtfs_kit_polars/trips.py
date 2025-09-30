@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Iterable
 import folium as fl
 import folium.plugins as fp
 import numpy as np
-import polars as pl
 import pandas as pd
+import polars as pl
 import shapely.geometry as sg
 import shapely.ops as so
 
@@ -125,7 +125,7 @@ def get_trips(
                 get_shapes(feed, as_geo=True, use_utm=use_utm)
                 .select(["shape_id", "geometry", "crs"])
                 .join(f, on=f["shape_id"], how="right")
-                .select(list(f.schema.names()) + ["geometry", "crs"])
+                .select(list(f.collect_schema().names()) + ["geometry", "crs"])
             )
 
     return f
@@ -189,7 +189,7 @@ def name_stop_patterns(feed: "Feed") -> pl.LazyFrame:
     to all zeros, proceed as above, then delete the column.
     """
     t = feed.trips
-    has_dir = "direction_id" in t.columns
+    has_dir = "direction_id" in t.collect_schema().names()
     tt = t if has_dir else t.with_columns(pl.lit(0).alias("direction_id"))
 
     # Per-trip stop pattern (ordered stop_ids joined with "-")
@@ -242,7 +242,7 @@ def compute_trip_stats(
     route_ids: list[str | None] = None,
     *,
     compute_dist_from_shapes: bool = False,
-) -> pd.DataFrame:
+):
     """
     Return a DataFrame with the following columns:
 
@@ -250,8 +250,8 @@ def compute_trip_stats(
     - ``'route_id'``
     - ``'route_short_name'``
     - ``'route_type'``
-    - ``'direction_id'``: NaN if missing from feed
-    - ``'shape_id'``: NaN if missing from feed
+    - ``'direction_id'``: null if missing from feed
+    - ``'shape_id'``: null if missing from feed
     - ``'stop_pattern_name'``: output from :func:`name_stop_patterns`
     - ``'num_stops'``: number of stops on trip
     - ``'start_time'``: first departure time of the trip
@@ -263,16 +263,16 @@ def compute_trip_stats(
     - ``'distance'``: distance of the trip;
       measured in kilometers if ``feed.dist_units`` is metric;
       otherwise measured in miles;
-      contains all ``np.nan`` entries if ``feed.shapes is None``
+      contains all null entries if ``feed.shapes is None``
     - ``'duration'``: duration of the trip in hours
     - ``'speed'``: distance/duration
 
     If ``feed.stop_times`` has a ``shape_dist_traveled`` column with at
-    least one non-NaN value and ``compute_dist_from_shapes == False``,
+    least one non-null value and ``compute_dist_from_shapes == False``,
     then use that column to compute the distance column.
     Else if ``feed.shapes is not None``, then compute the distance
     column using the shapes and Shapely.
-    Otherwise, set the distances to NaN.
+    Otherwise, set the distances to null.
 
     If route IDs are given, then restrict to trips on those routes.
 
@@ -294,136 +294,137 @@ def compute_trip_stats(
       yields a difference of at most 0.83km from the original values.
 
     """
-    f = name_stop_patterns(feed)
-
-    # Restrict to given route IDs
+    # Trips with stop pattern names
+    t = name_stop_patterns(feed)
     if route_ids is not None:
-        f = f[f["route_id"].isin(route_ids)].copy()
+        t = t.filter(pl.col("route_id").is_in(route_ids))
 
-    # Merge with stop times and extra trip info.
-    # Convert departure times to seconds past midnight to
-    # compute trip durations later.
-    if "direction_id" not in f.columns:
-        f["direction_id"] = np.nan
-    if "shape_id" not in f.columns:
-        f["shape_id"] = np.nan
+    # Ensure columns exist (nulls if missing)
+    if "direction_id" not in t.collect_schema().names():
+        t = t.with_columns(pl.lit(None).alias("direction_id"))
+    if "shape_id" not in t.collect_schema().names():
+        t = t.with_columns(pl.lit(None).alias("shape_id"))
 
-    f = (
-        f[["route_id", "trip_id", "direction_id", "shape_id", "stop_pattern_name"]]
-        .merge(feed.routes[["route_id", "route_short_name", "route_type"]])
-        .merge(feed.stop_times)
-        .sort_values(["trip_id", "stop_sequence"])
-        .assign(departure_time=lambda x: x["departure_time"].map(hp.timestr_to_seconds))
-    )
-
-    # Compute all trips stats except distance,
-    # which is possibly more involved
-    geometry_by_stop = feed.build_geometry_by_stop(use_utm=True)
-    g = f.groupby("trip_id")
-
-    def my_agg(group):
-        d = dict()
-        d["route_id"] = group["route_id"].iat[0]
-        d["route_short_name"] = group["route_short_name"].iat[0]
-        d["route_type"] = group["route_type"].iat[0]
-        d["direction_id"] = group["direction_id"].iat[0]
-        d["shape_id"] = group["shape_id"].iat[0]
-        d["stop_pattern_name"] = group["stop_pattern_name"].iat[0]
-        d["num_stops"] = group.shape[0]
-        d["start_time"] = group["departure_time"].iat[0]
-        d["end_time"] = group["departure_time"].iat[-1]
-        d["start_stop_id"] = group["stop_id"].iat[0]
-        d["end_stop_id"] = group["stop_id"].iat[-1]
-        dist = geometry_by_stop[d["start_stop_id"]].distance(
-            geometry_by_stop[d["end_stop_id"]]
+    # Join with stop_times and convert departure times to seconds
+    t = (
+        t.select("route_id", "trip_id", "direction_id", "shape_id", "stop_pattern_name")
+        .join(
+            feed.routes.select("route_id", "route_short_name", "route_type"),
+            on="route_id",
         )
-        d["is_loop"] = int(dist < 400)
-        d["duration"] = (d["end_time"] - d["start_time"]) / 3600
-        return pd.Series(d)
-
-    # Apply my_agg, but don't reset index yet.
-    # Need trip ID as index to line up the results of the
-    # forthcoming distance calculation
-    h = g.apply(my_agg, include_groups=False)
-
+        .join(feed.stop_times, on="trip_id")
+        .sort("trip_id", "stop_sequence")
+        .with_columns(dtime=hp.timestr_to_seconds_pl("departure_time"))
+    )
+    # Compute most trip stats
+    stops_g = feed.get_stops(as_geo=True, use_utm=True)
+    trip_stats = (
+        t.group_by("trip_id")
+        .agg(
+            route_id=pl.col("route_id").first(),
+            route_short_name=pl.col("route_short_name").first(),
+            route_type=pl.col("route_type").first(),
+            direction_id=pl.col("direction_id").first(),
+            shape_id=pl.col("shape_id").first(),
+            stop_pattern_name=pl.col("stop_pattern_name").first(),
+            num_stops=pl.col("stop_id").count(),
+            start_time=pl.col("dtime").min(),
+            end_time=pl.col("dtime").max(),
+            start_stop_id=pl.col("stop_id").first(),
+            end_stop_id=pl.col("stop_id").last(),
+            duration_s=pl.col("dtime").max() - pl.col("dtime").min(),
+        )
+        .join(
+            stops_g.select(start_stop_id="stop_id", start_geom="geometry"),
+            on="start_stop_id",
+            how="left",
+        )
+        .join(
+            stops_g.select(end_stop_id="stop_id", end_geom="geometry"),
+            on="end_stop_id",
+            how="left",
+        )
+        .with_columns(
+            duration=pl.col("duration_s") / 3600.0,
+            is_loop=(
+                pl.col("start_geom").st.distance(pl.col("end_geom")) < 400
+            ).fill_null(False),
+        )
+        .drop("duration_s")
+    )
     # Compute distance
-    if hp.is_not_null(f, "shape_dist_traveled") and not compute_dist_from_shapes:
-        # Compute distances using shape_dist_traveled column, converting to km or mi
-        if hp.is_metric(feed.dist_units):
-            convert_dist = hp.get_convert_dist(feed.dist_units, "km")
-        else:
-            convert_dist = hp.get_convert_dist(feed.dist_units, "mi")
-        h["distance"] = g.apply(
-            lambda group: convert_dist(group.shape_dist_traveled.max())
+    if (
+        hp.is_not_null(feed.stop_times, "shape_dist_traveled")
+        and not compute_dist_from_shapes
+    ):
+        conv = (
+            hp.get_convert_dist(feed.dist_units, "km")
+            if hp.is_metric(feed.dist_units)
+            else hp.get_convert_dist(feed.dist_units, "mi")
         )
+        d = (
+            t.group_by("trip_id")
+            .agg(distance=pl.col("shape_dist_traveled").max())
+            .with_columns(
+                # Could speed this up with native Polars conv function
+                distance=conv(pl.col("distance"))
+            )
+        )
+        trip_stats = trip_stats.join(d, "trip_id", how="left")
+
     elif feed.shapes is not None:
-        # Compute distances using the shapes and Shapely
-        geometry_by_shape = feed.build_geometry_by_shape(use_utm=True)
-        # Convert to km or mi
-        if hp.is_metric(feed.dist_units):
-            m_to_dist = hp.get_convert_dist("m", "km")
-        else:
-            m_to_dist = hp.get_convert_dist("m", "mi")
-
-        def compute_dist(group):
-            """
-            Return the distance traveled along the trip between the
-            first and last stops.
-            If that distance is negative or if the trip's linestring
-            intersects itfeed, then return the length of the trip's
-            linestring instead.
-            """
-            shape = group["shape_id"].iat[0]
-            try:
-                # Get the linestring for this trip
-                linestring = geometry_by_shape[shape]
-            except KeyError:
-                # Shape ID is NaN or doesn't exist in shapes.
-                # No can do.
-                return np.nan
-
-            # If the linestring intersects itfeed, then that can cause
-            # errors in the computation below, so just
-            # return the length of the linestring as a good approximation
-            D = linestring.length
-            if not linestring.is_simple:
-                return D
-
-            # Otherwise, return the difference of the distances along
-            # the linestring of the first and last stop
-            start_stop = group["stop_id"].iat[0]
-            end_stop = group["stop_id"].iat[-1]
-            try:
-                start_point = geometry_by_stop[start_stop]
-                end_point = geometry_by_stop[end_stop]
-            except KeyError:
-                # One of the two stop IDs is NaN, so just
-                # return the length of the linestring
-                return D
-            d1 = linestring.project(start_point)
-            d2 = linestring.project(end_point)
-            d = d2 - d1
-            if 0 < d < D + 100:
-                return d
-            else:
-                # Something is probably wrong, so just
-                # return the length of the linestring
-                return D
-
-        h["distance"] = g.apply(compute_dist, include_groups=False)
-        # Convert from meters
-        h["distance"] = h["distance"].map(m_to_dist)
+        conv = hp.get_convert_dist("m", feed.dist_units)
+        d = (
+            feed.get_shapes(as_geo=True, use_utm=True)
+            .with_columns(
+                is_simple=pl.col("geometry").st.is_simple(),
+                D=pl.col("geometry").st.length(),
+            )
+            .join(
+                trip_stats.select("trip_id", "shape_id", "start_geom", "end_geom"),
+                "shape_id",
+            )
+            .with_columns(
+                d=(
+                    # If simple linestring, then compute its length
+                    pl.when("is_simple")
+                    .then("D")
+                    # Otherwise, compute distance from first stop to last stop along linestring
+                    .otherwise(
+                        pl.col("geometry").st.project("end_geom")
+                        - pl.col("geometry").st.project("start_geom")
+                    )
+                )
+            )
+            # Assign distance based on ``d`` and ``D``
+            .with_columns(
+                distance=(
+                    pl.when((0 < pl.col("d")) & (pl.col("d") < pl.col("D") + 100))
+                    .then("d")
+                    .otherwise("D")
+                )
+            )
+            # Convert to feed dist units
+            .select(
+                "trip_id",
+                # Could speed this up with native Polars conv function
+                distance=conv(pl.col("distance")),
+            )
+        )
+        trip_stats = trip_stats.join(d, "trip_id", how="left")
     else:
-        h["distance"] = np.nan
+        trip_stats = trip_stats.with_columns(distance=pl.lit(None, dtype=pl.Float64))
 
-    # Reset index and compute final stats
-    h = h.reset_index()
-    h["speed"] = h["distance"] / h["duration"]
-    h[["start_time", "end_time"]] = h[["start_time", "end_time"]].map(
-        lambda x: hp.seconds_to_timestr(x)
+    # Compute speed and finalize
+    return (
+        trip_stats.drop("start_geom", "end_geom")
+        .with_columns(
+            speed=pl.col("distance") / pl.col("duration"),
+            start_time=hp.seconds_to_timestr_pl("start_time"),
+            end_time=hp.seconds_to_timestr_pl("end_time"),
+        )
+        .sort("route_id", "direction_id", "start_time")
     )
-
-    return h.sort_values(["route_id", "direction_id", "start_time"], ignore_index=True)
 
 
 def locate_trips(feed: "Feed", date: str, times: list[str]) -> pd.DataFrame:
