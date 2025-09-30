@@ -313,7 +313,7 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/15/6e/9cfffe6856f48852a3dc78fa6c1be989a2b22d424a80d1e5f92fc1dac02d/ghp-import-1.1.0.tar.gz", hash = "sha256:c22a9ce10c37753e2688d164d765a700dae4b8d79fa6db0a2c3132ba7881894f", size = 13041, upload-time = "2021-03-19T19:38:19.078Z" }
 
 [[package]]
-name = "gtfs-kit-next"
+name = "gtfs-kit-polars"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
@@ -604,7 +604,7 @@ wheels = [
 
 [[package]]
 name = "marimo"
-version = "0.16.2"
+version = "0.16.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -625,9 +625,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/62/d8def85c7ddf58a3a371eef3e553b8426e685b99a9cb8c3847c702422ec8/marimo-0.16.2.tar.gz", hash = "sha256:2bd90431846c470b4a83ded7ee8b4442854c47ad670b0aafa5fe697e54bddd5a", size = 33654187, upload-time = "2025-09-24T12:41:55.255Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/b6/ad9f00808e8f67fd7c179dc12e17ce6f219fbd382ba4f13d07e481b1f038/marimo-0.16.3.tar.gz", hash = "sha256:ce59bff2b7964a69faf65b20a57f3156ae845ddba364476720da89a3090670ef", size = 33680060, upload-time = "2025-09-29T18:38:46.556Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b3/0c/65a605b99486461babb6a44e516cff7cfd892a7476df8c9990e023c07625/marimo-0.16.2-py3-none-any.whl", hash = "sha256:4617864fec69a5114ce74d3200dd2f1fb38e3757afd00e0a89b2fe2b56532d09", size = 34058910, upload-time = "2025-09-24T12:41:59.721Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/f5/b830e8f532c3493bb1e8aa82c5151c232dd80bb382432c9d411e9ca644d3/marimo-0.16.3-py3-none-any.whl", hash = "sha256:6ed5c472368a56045007f5c6456b433ec59be15e6959e25469161e9f75f8d9b9", size = 34081814, upload-time = "2025-09-29T18:38:41.795Z" },
 ]
 
 [[package]]
@@ -780,11 +780,11 @@ wheels = [
 
 [[package]]
 name = "narwhals"
-version = "2.5.0"
+version = "2.6.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7b/b8/3cb005704866f1cc19e8d6b15d0467255821ba12d82f20ea15912672e54c/narwhals-2.5.0.tar.gz", hash = "sha256:8ae0b6f39597f14c0dc52afc98949d6f8be89b5af402d2d98101d2f7d3561418", size = 558573, upload-time = "2025-09-12T10:04:24.436Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/dd/40ff412dabf90ef6b99266b0b74f217bb88733541733849e0153a108c750/narwhals-2.6.0.tar.gz", hash = "sha256:5c9e2ba923e6a0051017e146184e49fb793548936f978ce130c9f55a9a81240e", size = 561649, upload-time = "2025-09-29T09:08:56.482Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/5a/22741c5c0e5f6e8050242bfc2052ba68bc94b1735ed5bca35404d136d6ec/narwhals-2.5.0-py3-none-any.whl", hash = "sha256:7e213f9ca7db3f8bf6f7eff35eaee6a1cf80902997e1b78d49b7755775d8f423", size = 407296, upload-time = "2025-09-12T10:04:22.524Z" },
+    { url = "https://files.pythonhosted.org/packages/50/3b/0e2c535c3e6970cfc5763b67f6cc31accaab35a7aa3e322fb6a12830450f/narwhals-2.6.0-py3-none-any.whl", hash = "sha256:3215ea42afb452c6c8527e79cefbe542b674aa08d7e2e99d46b2c9708870e0d4", size = 408435, upload-time = "2025-09-29T09:08:54.503Z" },
 ]
 
 [[package]]
