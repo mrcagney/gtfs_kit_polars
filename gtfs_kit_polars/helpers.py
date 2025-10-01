@@ -207,16 +207,19 @@ def timestr_mod24(col: str) -> pl.Expr:
     )
 
 
-def replace_date(f: pd.DataFrame, date: str) -> pd.DataFrame:
+def replace_date(f: pl.LazyFrame, date: str) -> pl.LazyFrame:
     """
     Given a table with a datetime object column called 'datetime' and given a
     YYYYMMDD date string, replace the datetime dates with the given date
     and return the resulting table.
     """
     d = datestr_to_date(date)
-    return f.assign(
-        datetime=lambda x: x["datetime"].map(
-            lambda t: t.replace(year=d.year, month=d.month, day=d.day)
+    return f.with_columns(
+        datetime=pl.datetime(d.year, d.month, d.day)
+        + pl.duration(
+            hours=pl.col("datetime").dt.hour(),
+            minutes=pl.col("datetime").dt.minute(),
+            seconds=pl.col("datetime").dt.second(),
         )
     )
 
@@ -348,31 +351,6 @@ def get_convert_dist(dist_units_in: str, dist_units_out: str):
     return builder
 
 
-# def get_convert_dist(
-#     dist_units_in: str, dist_units_out: str
-# ) -> Callable[[float], float]:
-#     """
-#     Return a function of the form
-
-#       distance in the units ``dist_units_in`` ->
-#       distance in the units ``dist_units_out``
-
-#     Only supports distance units in :const:`constants.DIST_UNITS`.
-#     """
-#     di, do = dist_units_in, dist_units_out
-#     DU = cs.DIST_UNITS
-#     if not (di in DU and do in DU):
-#         raise ValueError(f"Distance units must lie in {DU}")
-
-#     d = {
-#         "ft": {"ft": 1, "m": 0.3048, "mi": 1 / 5280, "km": 0.000_304_8},
-#         "m": {"ft": 1 / 0.3048, "m": 1, "mi": 1 / 1609.344, "km": 1 / 1000},
-#         "mi": {"ft": 5280, "m": 1609.344, "mi": 1, "km": 1.609_344},
-#         "km": {"ft": 1 / 0.000_304_8, "m": 1000, "mi": 1 / 1.609_344, "km": 1},
-#     }
-#     return lambda x: d[di][do] * x
-
-
 def is_not_null(f: pl.DataFrame | pl.LazyFrame, col_name: str) -> bool:
     """
     Return ``True`` if the given DataFrame has a column of the given
@@ -420,13 +398,13 @@ def get_active_trips_df(trip_times: pd.DataFrame) -> pd.Series:
 
 
 def combine_time_series(
-    series_by_indicator: dict[str, pd.DataFrame],
+    series_by_indicator: dict[str, pl.DataFrame | pl.LazyFrame],
     *,
     kind: Literal["route", "stop"],
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
-    Combine a dict of wide time series (one DataFrame per indicator, columns are entities)
+    Combine a dict of wide time series (one table per indicator, columns are entities)
     into a single long-form time series with columns
 
     - ``'datetime'``
@@ -441,74 +419,71 @@ def combine_time_series(
     (direction 1) in the route ID or stop ID column values.
     """
     if not series_by_indicator:
-        return pd.DataFrame()
+        return pl.LazyFrame(schema={"datetime": pl.Datetime})
 
-    # Validate indices and types
     indicators = list(series_by_indicator.keys())
-    base_index: pd.DatetimeIndex | None = None
-    for ind, df in series_by_indicator.items():
-        if not isinstance(df, pd.DataFrame):
-            raise TypeError(f"Indicator '{ind}' is not a DataFrame.")
-        if not isinstance(df.index, pd.DatetimeIndex):
-            raise ValueError(f"Indicator '{ind}' must have a DatetimeIndex.")
-        if base_index is None:
-            base_index = df.index
-        elif not base_index.equals(df.index):
-            raise ValueError(
-                "All indicator DataFrames must share the same DatetimeIndex."
-            )
-
     entity_col = "route_id" if kind == "route" else "stop_id"
 
-    # Wide to long for each indicator
-    long_frames: list[pd.DataFrame] = []
-    for ind, wf in series_by_indicator.items():
-        s = wf.stack(dropna=False).rename(ind)  # (datetime, entity) -> value
-        lf = s.reset_index()
-        lf.columns = ["datetime", entity_col, ind]
-        long_frames.append(lf)
+    # Convert wide to long time series for each indicator
+    long_frames = []
+    for ind, f in series_by_indicator.items():
+        f = f if isinstance(f, pl.LazyFrame) else f.lazy()
+        value_cols = [c for c in f.collect_schema().names() if c != "datetime"]
+        if not value_cols:
+            continue
+        g = f.unpivot(
+            index=["datetime"],
+            on=value_cols,
+            variable_name=entity_col,
+            value_name=ind,
+        )
+        long_frames.append(g)
 
-    # Merge all indicators on (datetime, entity)
+    if not long_frames:
+        return pl.LazyFrame(schema={"datetime": pl.Datetime, entity_col: pl.Utf8})
+
+    # Full join all indicators on (``datetime``, ``entity``)
     f = ft.reduce(
-        lambda a, b: pd.merge(a, b, on=["datetime", entity_col], how="outer"),
+        lambda left, right: left.join(
+            right, on=["datetime", entity_col], how="full", coalesce=True
+        ),
         long_frames,
     )
 
     # Optionally split direction from encoded IDs "<id>-<dir>"
     if split_directions:
-
-        def _split(ent):
-            if pd.isna(ent):
-                return np.nan, np.nan
-            parts = str(ent).rsplit("-", 1)
-            if len(parts) != 2:
-                return ent, np.nan
-            eid, did = parts
-            try:
-                return eid, int(did)
-            except Exception:
-                return eid, np.nan
-
-        split = f[entity_col].map(_split)
-        f[entity_col] = split.map(lambda t: t[0])
-        f["direction_id"] = split.map(lambda t: t[1])
-
-    # Coerce numeric indicators and fill NaNs with 0 (speed handled later)
-    numeric_cols = []
-    for ind in indicators:
-        if ind in f.columns:
-            f[ind] = pd.to_numeric(f[ind], errors="coerce")
-            numeric_cols.append(ind)
+        f = (
+            f.with_columns(
+                _base=pl.col(entity_col).str.extract(r"^(.*)-(0|1)$", group_index=1),
+                _dir=pl.col(entity_col)
+                .str.extract(r"^(.*)-(0|1)$", group_index=2)
+                .cast(pl.Int32),
+            )
+            .with_columns(
+                pl.when(pl.col("_base").is_not_null())
+                .then(pl.col("_base"))
+                .otherwise(pl.col(entity_col))
+                .alias(entity_col),
+                pl.col("_dir").alias("direction_id"),
+            )
+            .drop("_base", "_dir")
+        )
+    # Coerce numeric indicators and fill nulls with 0; speed handled later
+    fcols = f.collect_schema().names()
+    numeric_cols = [ind for ind in indicators if ind in fcols]
     if numeric_cols:
-        f[numeric_cols] = f[numeric_cols].fillna(0)
+        f = f.with_columns(
+            [pl.col(c).cast(pl.Float64).fill_null(0.0).alias(c) for c in numeric_cols]
+        )
 
     # Compute service_speed if possible
-    if "service_distance" in f.columns and "service_duration" in f.columns:
-        f["service_speed"] = (
-            f["service_distance"]
-            .div(f["service_duration"])
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0.0)
+    if "service_distance" in fcols and "service_duration" in fcols:
+        f = f.with_columns(
+            service_speed=(
+                pl.when(pl.col("service_duration") > 0)
+                .then(pl.col("service_distance") / pl.col("service_duration"))
+                .otherwise(0.0)
+            ).cast(pl.Float64)
         )
 
     # Arrange columns
@@ -523,54 +498,86 @@ def combine_time_series(
         "service_distance",
         "service_speed",
     ]
-    return f.filter(cols).sort_values(cols0, ignore_index=True)
+    return f.select(cols).sort(cols0)
 
 
-def downsample(time_series: pd.DataFrame, freq: str) -> pd.DataFrame:
+def get_bin_size(time_series: pl.LazyFrame) -> float:
     """
-    Downsample the given stop, route,  or network time series,
-    (outputs of :func:`.stops.compute_stop_time_series`,
-    :func:`.routes.compute_route_time_series`, or
-    :func:`.miscellany.compute_network_time_series`,
-    respectively) to the given frequency (Pandas frequency string, e.g. '15Min').
-
-    Return the given time series unchanged if the given frequency is
-    finer than the original frequency or the given frequncy is courser than a day.
+    Return the number of minutes per bin of the given time series with datetime column
+    'datetime'.
+    Assume the time series is regularly sampled and therefore has a single bin size.
+    Return None if there's only one unique datetime present.
     """
-    import pandas.tseries.frequencies as pdf
+    times = (
+        time_series.select("datetime")
+        .unique()
+        .sort("datetime")
+        .collect()["datetime"]
+        .to_list()[:2]
+    )
+    if len(times) >= 2:
+        return (times[1] - times[0]).seconds / 60
 
-    # Handle defunct cases
-    if time_series.is_empty():
-        return time_series
 
-    f = time_series.assign(datetime=lambda x: pd.to_datetime(x["datetime"]))
-    ifreq = pd.infer_freq(f["datetime"].unique()[:3])
-    if ifreq is None:
-        # Carry on, assuming everything will work
-        pass
-        # raise ValueError("Can't infer frequency of time series")
-    elif pdf.to_offset(freq) <= pdf.to_offset(ifreq) or pdf.to_offset(
-        freq
-    ) > pdf.to_offset("24h"):
-        return f
+def downsample(
+    time_series: pl.DataFrame | pl.LazyFrame, num_minutes: int
+) -> pl.LazyFrame:
+    """
+    Downsample the given route, stop, or feed time series,
+    (outputs of :func:`.routes.compute_route_time_series`,
+    :func:`.stops.compute_stop_time_series`, or
+    :func:`.miscellany.compute_feed_time_series`,
+    respectively) to time bins of size ``num_minutes`` minutes.
 
-    # Handle generic case
-    id_cols = list(
-        {"route_id", "stop_id", "direction_id", "route_type"} & set(f.columns)
+    Return the given time series unchanged if it's empty or
+    has only one time bin per date.
+    Raise a value error if ``num_minutes`` does not evenly divide 1440
+    (the number of minutes in a day) or if its not a multiple of the
+    bin size of the given time series.
+    """
+    # Coerce to LazyFrame
+    time_series = (
+        time_series.lazy() if isinstance(time_series, pl.DataFrame) else time_series
     )
 
-    if not id_cols:
-        # Network time series without route type
-        f["tmp"] = "tmp"
-        id_cols = ["tmp"]
+    # Handle defunct cases
+    if is_empty(time_series):
+        return time_series
 
-    if "stop_id" in time_series.columns:
-        is_stop_series = True
-        indicators = ["num_trips"]
+    orig_num_minutes = get_bin_size(time_series)
+    if orig_num_minutes is None:
+        return time_series
+
+    num_minutes = int(num_minutes)
+    if num_minutes == orig_num_minutes:
+        return time_series
+
+    if 1440 % num_minutes != 0:
+        raise ValueError("num_minutes must evenly divide 24*60")
+
+    if num_minutes % orig_num_minutes != 0:
+        raise ValueError(
+            f"num_minutes must be a multiple of the original time series bin size "
+            f"({orig_num_minutes} minutes)"
+        )
+
+    # Handle generic case
+    cols = time_series.collect_schema().names()
+    freq = f"{num_minutes}m"
+    if "stop_id" in cols:
+        # It's a stops time series
+        metrics = ["num_trips"]
+        dims = [c for c in cols if c not in (["datetime"] + metrics)]
+        result = time_series.group_by_dynamic(
+            "datetime",
+            every=freq,
+            closed="left",
+            label="left",
+            group_by=dims,
+        ).agg(num_trips=pl.col("num_trips").sum())
     else:
-        # It's a route or network time series.
-        is_stop_series = False
-        indicators = [
+        # It's a route or feed time series
+        metrics = [
             "num_trips",
             "num_trip_starts",
             "num_trip_ends",
@@ -578,69 +585,53 @@ def downsample(time_series: pd.DataFrame, freq: str) -> pd.DataFrame:
             "service_duration",
             "service_speed",
         ]
+        dims = [c for c in cols if c not in (["datetime"] + metrics)]
 
-    def agg_num_trips(g):
-        """
-        Num trips uses custom rule:
-        last(num_trips in bin) + sum(num_trip_ends in all but the last row in the bin)
-        """
-        if g.is_empty():
-            return np.nan
-        return g["num_trips"].iloc[-1] + g["num_trip_ends"].iloc[:-1].sum(min_count=1)
-
-    frames = []
-    for key, group in f.groupby(id_cols, dropna=False):
-        g = group.sort_values("datetime").set_index("datetime")
-        # groupby + Grouper will not create empty bins
-        gb = g.groupby(pd.Grouper(freq=freq))
-
-        if is_stop_series:
-            # Sum all numeric columns, preserving all-NaN groups (min_count=1)
-            agg = (
-                gb.sum(min_count=1)
-                # Remove any extra dates inserted in between,
-                # which will have all NAN values
-                .dropna()
-                .reset_index()
+        # Sum across coarse timestamps and get last fine timestamp
+        sums = (
+            time_series.group_by_dynamic(
+                "datetime",
+                every=freq,
+                closed="left",
+                label="left",
+                group_by=dims,
             )
-        else:
-            series = []
-            for col in indicators:
-                if col == "num_trips":
-                    s = gb.apply(agg_num_trips)
-                elif col != "service_speed":
-                    s = gb[col].agg(lambda x: x.sum(min_count=1))
-                series.append(s.rename(col))
-
-            agg = (
-                pd.concat(series, axis="columns")
-                # Remove any extra dates inserted in between,
-                # which will have all NAN values
-                .dropna()
-                # Compute service speed now
-                .assign(
-                    service_speed=lambda x: x["service_distance"]
-                    .div(x["service_duration"])
-                    .replace([np.inf, -np.inf], np.nan)
-                    .fillna(0.0)
-                )
-                # Bring back 'datetime' column
-                .reset_index()
+            .agg(
+                num_trip_starts=pl.col("num_trip_starts").sum(),
+                num_trip_ends=pl.col("num_trip_ends").sum(),
+                service_distance=pl.col("service_distance").sum(),
+                service_duration=pl.col("service_duration").sum(),
+                last_dt=pl.col("datetime").max(),
             )
+            .rename({"datetime": "big"})  # coarse timestamp label
+        )
+        # Get last fine timestamp values per coarse timestamp values of
+        # num_trips and num_trip_ends to use in aggregation:
+        # num_trips = num_trips_last + sum(num_trip_ends in all but last fine timestamp)
+        #           = num_trips_last + (num_trip_ends_sum - num_trip_ends_last)
+        last_vals = (
+            time_series.select(dims + ["datetime", "num_trips", "num_trip_ends"])
+            .join(sums.select(dims + ["big", "last_dt"]), on=dims, how="inner")
+            .filter(pl.col("datetime") == pl.col("last_dt"))
+            .group_by(dims + ["big"])
+            .agg(
+                num_trips_last=pl.col("num_trips").max(),
+                num_trip_ends_last=pl.col("num_trip_ends").max(),
+            )
+        )
 
-        # Reattach ID columns
-        if isinstance(key, tuple):
-            for col, val in zip(id_cols, key):
-                agg[col] = val
-        else:
-            agg[id_cols[0]] = key
+        # Merge and compute final metrics
+        result = sums.join(last_vals, on=dims + ["big"], how="left").with_columns(
+            num_trips=pl.col("num_trips_last")
+            + pl.col("num_trip_ends")
+            - pl.col("num_trip_ends_last"),
+            service_speed=(
+                pl.col("service_distance") / pl.col("service_duration")
+            ).fill_null(0),
+            datetime=pl.col("big"),
+        )
 
-        frames.append(agg)
-
-    # Collate results
-    cols0 = ["datetime"] + [x for x in id_cols if x != "tmp"]
-    cols = cols0 + indicators
-    return pd.concat(frames).filter(cols).sort_values(cols0, ignore_index=True)
+    return result.select(["datetime"] + dims + metrics).sort(["datetime"] + dims)
 
 
 def make_html(d: dict) -> str:

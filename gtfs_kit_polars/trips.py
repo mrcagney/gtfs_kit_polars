@@ -31,35 +31,34 @@ def get_active_services(feed: "Feed", date: str) -> list[str]:
     return the service IDs that are active on the date.
     """
 
-    # helper: empty one-col LazyFrame
-    def _empty():
+    def empty():
         return pl.LazyFrame(schema={"service_id": pl.Utf8})
 
     # Weekday column name (e.g., "monday")
     weekday_str = dt.datetime.strptime(date, "%Y%m%d").strftime("%A").lower()
 
-    # calendar: services scheduled on this date (start<=date<=end and weekday==1)
-    active_1 = _empty()
+    active_1 = empty()
     if feed.calendar is not None:
+        # Filter calendar to services active on date
         active_1 = feed.calendar.filter(
             (pl.col("start_date") <= date)
             & (pl.col("end_date") >= date)
             & (pl.col(weekday_str) == 1)
         ).select("service_id")
 
-    # calendar_dates: services explicitly added on date (exception_type==1)
-    active_2 = _empty()
-    # calendar_dates: services explicitly removed on date (exception_type==2)
-    removed = _empty()
+    active_2 = empty()
+    removed = empty()
     if feed.calendar_dates is not None:
+        # Filter calendar_dates to services active on date
         active_2 = feed.calendar_dates.filter(
             (pl.col("date") == date) & (pl.col("exception_type") == 1)
         ).select("service_id")
+        # Filter calendar_dates to services removed on date
         removed = feed.calendar_dates.filter(
             (pl.col("date") == date) & (pl.col("exception_type") == 2)
         ).select("service_id")
 
-    # Union active parts, then set-difference removed
+    # Union active services, then set-difference removed services
     return (
         pl.concat([active_1, active_2])
         .unique()
@@ -258,8 +257,8 @@ def compute_trip_stats(
     - ``'end_time'``: last departure time of the trip
     - ``'start_stop_id'``: stop ID of the first stop of the trip
     - ``'end_stop_id'``: stop ID of the last stop of the trip
-    - ``'is_loop'``: 1 if the start and end stop are less than 400m apart and
-      0 otherwise
+    - ``'is_loop'``: True if the start and end stop are less than 400m apart and
+      False otherwise
     - ``'distance'``: distance of the trip;
       measured in kilometers if ``feed.dist_units`` is metric;
       otherwise measured in miles;

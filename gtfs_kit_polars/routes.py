@@ -4,6 +4,7 @@ Functions about routes.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from typing import TYPE_CHECKING, Iterable
 
@@ -318,10 +319,10 @@ def compute_route_stats_0(
     - ``'num_trip_ends'``: number of trips on the route with nonnull
       end times that end before 23:59:59
     - ``'num_stop_patterns'``: number of stop pattern across trips
-    - ``'is_loop'``: 1 if at least one of the trips on the route has
-      its ``is_loop`` field equal to 1; 0 otherwise
-    - ``'is_bidirectional'``: 1 if the route has trips in both
-      directions; 0 otherwise; present if only if not ``split_directions``
+    - ``'is_loop'``: True if at least one of the trips on the route has
+      its ``is_loop`` field equal to True; False otherwise
+    - ``'is_bidirectional'``: True if the route has trips in both
+      directions; False otherwise; present if only if not ``split_directions``
     - ``'start_time'``: start time of the earliest trip on the route
     - ``'end_time'``: end time of latest trip on the route
     - ``'max_headway'``: maximum of the durations (in minutes)
@@ -683,14 +684,14 @@ def compute_route_stats(
 
 
 def compute_route_time_series_0(
-    trip_stats: pd.DataFrame,
+    trip_stats: pl.DataFrame | pl.LazyFrame,
     date_label: str = "20010101",
-    freq: str = "h",
+    num_minutes: int = 60,
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
-    Compute stats in a 24-hour time series form at the given Pandas frequency
+    Compute stats in a 24-hour time series form at the ``num_minutes`` frequency
     for the given subset of trip stats of the
     form output by the function :func:`.trips.compute_trip_stats`.
 
@@ -741,46 +742,42 @@ def compute_route_time_series_0(
       direction ID values present
 
     """
-    final_cols = [
-        "datetime",
-        "route_id",
-        "num_trips",
-        "num_trip_starts",
-        "num_trip_ends",
-        "service_distance",
-        "service_duration",
-        "service_speed",
-    ]
-    if split_directions:
-        final_cols.insert(2, "direction_id")
-
-    null_stats = pd.DataFrame([], columns=final_cols)
+    ts = trip_stats.collect() if isinstance(trip_stats, pl.LazyFrame) else trip_stats
 
     # Handle defunct case
-    if trip_stats.is_empty():
+    schema = {
+        "datetime": pl.Datetime,
+        "route_id": pl.Utf8,
+        "num_trips": pl.Float64,
+        "num_trip_starts": pl.Float64,
+        "num_trip_ends": pl.Float64,
+        "service_distance": pl.Float64,
+        "service_duration": pl.Float64,
+        "service_speed": pl.Float64,
+    }
+    if split_directions:
+        schema["direction_id"] = pl.Int8
+
+    null_stats = pl.LazyFrame(schema=schema)
+    if hp.is_empty(ts):
         return null_stats
 
-    tss = trip_stats.copy()
     if split_directions:
-        tss = tss.loc[lambda x: x.direction_id.notnull()].assign(
-            direction_id=lambda x: x.direction_id.astype(int)
-        )
-        if tss.is_empty():
-            raise ValueError(
-                "At least one trip stats direction ID value must be non-NaN."
-            )
-
         # Alter route IDs to encode direction:
         # <route ID>-0 and <route ID>-1 or <route ID>-NA
-        tss["route_id"] = (
-            tss["route_id"] + "-" + tss["direction_id"].map(lambda x: str(int(x)))
+        ts = ts.filter(pl.col("direction_id").is_not_null()).with_columns(
+            pl.col("direction_id").cast(pl.Int8),
+            route_id=(
+                pl.col("route_id") + pl.lit("-") + pl.col("direction_id").cast(pl.Utf8)
+            ),
         )
+        if hp.is_empty(ts):
+            raise ValueError(
+                "At least one trip stats direction ID value must be non-null."
+            )
 
-    routes = tss["route_id"].unique()
-
-    # Build a dictionary of time series and then merge them all
-    # at the end.
-    # Assign a uniform generic date for the index
+    # Build a dictionary of time series and then collate at the end.
+    # Assign a uniform dummy date.
     indicators = [
         "num_trip_starts",
         "num_trip_ends",
@@ -790,29 +787,30 @@ def compute_route_time_series_0(
     ]
 
     # Bin start and end times
-    bins = [i for i in range(24 * 60)]  # One bin for each minute
+    bins = list(range(24 * 60))
     num_bins = len(bins)
 
-    def timestr_to_min(x):
-        return hp.timestr_to_seconds(x, mod24=True) // 60
+    def timestr_to_min(col: str) -> pl.Expr:
+        return hp.timestr_to_seconds(col, mod24=True) // 60
 
-    tss["start_index"] = tss["start_time"].map(timestr_to_min)
-    tss["end_index"] = tss["end_time"].map(timestr_to_min)
+    ts = ts.with_columns(
+        start_index=timestr_to_min("start_time"),
+        end_index=timestr_to_min("end_time"),
+    )
 
     # Bin each trip according to its start and end time and weight
-    routes = sorted(tss["route_id"].dropna().unique().tolist())
+    routes = sorted(ts["route_id"].unique().to_list())
     series_by_route_by_indicator = {
-        indicator: {route: [0 for i in range(num_bins)] for route in routes}
-        for indicator in indicators
+        ind: {route: [0] * num_bins for route in routes} for ind in indicators
     }
-    for row in tss.itertuples(index=False):
-        route = row.route_id
-        start = row.start_index
-        end = row.end_index
-        distance = row.distance
+    for row in ts.iter_rows(named=True):
+        route = row["route_id"]
+        start = row["start_index"]
+        end = row["end_index"]
+        distance = row.get("distance")
 
         # Ignore defunct trips
-        if pd.isna(start) or pd.isna(end) or start == end:
+        if start is None or end is None or start == end:
             continue
 
         # Get bins to fill
@@ -828,58 +826,53 @@ def compute_route_time_series_0(
         # Num trip ends.
         # Don't mark trip ends for trips that run past midnight;
         # allows for easy resampling of num_trips later.
-        if start <= end:
+        if start < end:
             series_by_route_by_indicator["num_trip_ends"][route][end] += 1
 
-        # Do rest of indicators
-        for indicator in indicators[2:]:
-            if indicator == "num_trips":
-                weight = 1
-            elif indicator == "service_duration":
-                weight = 1 / 60
-            else:
-                weight = distance / len(bins_to_fill)
-            for b in bins_to_fill:
-                series_by_route_by_indicator[indicator][route][b] += weight
+        # Do rest of indicators (per minute accrual)
+        L = len(bins_to_fill)
+        for b in bins_to_fill:
+            series_by_route_by_indicator["num_trips"][route][b] += 1
+            series_by_route_by_indicator["service_duration"][route][b] += 1 / 60.0
+            if distance is not None and L > 0:
+                series_by_route_by_indicator["service_distance"][route][b] += (
+                    distance / L
+                )
 
-    # Build per-indicator DataFrames indexed by minute across the provided date
-    rng = pd.date_range(
-        pd.to_datetime(f"{date_label} 00:00:00"), periods=24 * 60, freq="Min"
-    )
-    series_by_indicator = {
-        indicator: pd.DataFrame(
-            series_by_route_by_indicator[indicator], index=rng
-        ).fillna(0)
-        for indicator in indicators
-    }
+    # Build per-indicator table by minute over provided date label
+    base_dt = dt.datetime.strptime(date_label + " 00:00:00", "%Y%m%d %H:%M:%S")
+    rng = [base_dt + dt.timedelta(minutes=i) for i in range(24 * 60)]
+    series_by_indicator = {}
+    for ind in indicators:
+        cols = {"datetime": rng}
+        for route in routes:
+            cols[route] = series_by_route_by_indicator[ind][route]
+        series_by_indicator[ind] = pl.LazyFrame(cols, strict=False)
 
-    # Combine into a single long-form time series per route (and direction if requested);
-    # hp.combine_time_series is expected to compute derived fields like service_speed
-    g = hp.combine_time_series(
+    # Combine & downsample via helpers and return a LazyFrame
+    return hp.combine_time_series(
         series_by_indicator, kind="route", split_directions=split_directions
-    )
-    # Downsample to requested frequency (sum for counts/durations/distances; speed handled by helper)
-    return hp.downsample(g, freq=freq)
+    ).pipe(hp.downsample, num_minutes=num_minutes)
 
 
 def compute_route_time_series(
     feed: "Feed",
     dates: list[str],
-    trip_stats: pd.DataFrame | None = None,
-    freq: str = "h",
+    trip_stats: pl.DataFrame | pl.LazyFrame | None = None,
+    num_minutes: int = 60,
     *,
     split_directions: bool = False,
 ) -> pd.DataFrame:
     """
-    Compute route stats in time series form for the trips that lie in
-    the trip stats subset, which defaults to the output of
-    :func:`.trips.compute_trip_stats`, and that start on the given dates
+    Compute route stats in time series form at the given ``num_minutes`` frequency
+    for the trips that lie in the trip stats subset,
+    which defaults to the output of :func:`.trips.compute_trip_stats`,
+    and that start on the given dates
     (YYYYMMDD date strings).
 
     If ``split_directions``, then separate each routes's stats by trip direction.
-    Specify the time series frequency with a Pandas frequency string, e.g. ``'5Min'``.
 
-    Return a time series DataFrame with the following columns.
+    Return a time series table with the following columns.
 
     - ``datetime``: datetime object
     - ``route_id``
@@ -914,8 +907,15 @@ def compute_route_time_series(
 
     """
     dates = feed.subset_dates(dates)
+    if trip_stats is None:
+        trip_stats = feed.compute_trip_stats()
+    else:
+        trip_stats = (
+            trip_stats if isinstance(trip_stats, pl.LazyFrame) else trip_stats.lazy()
+        )
+
     null_stats = compute_route_time_series_0(
-        pd.DataFrame(), split_directions=split_directions
+        trip_stats.limit(0), split_directions=split_directions
     )
 
     # Handle defunct case
@@ -923,29 +923,34 @@ def compute_route_time_series(
         return null_stats
 
     activity = feed.compute_trip_activity(dates)
-    if trip_stats is None:
-        trip_stats = feed.compute_trip_stats()
-    else:
-        trip_stats = trip_stats.copy()
 
     # Collect stats for each date, memoizing stats by trip ID sequence
     # to avoid unnecessary re-computations.
     # Store in dictionary of the form
     # trip ID sequence -> stats table
-    null_stats = pd.DataFrame()
     stats_by_ids = {}
     activity = feed.compute_trip_activity(dates)
     frames = []
     for date in dates:
-        ids = tuple(sorted(activity.loc[activity[date] > 0, "trip_id"].values))
+        ids = tuple(
+            sorted(
+                activity.filter(pl.col(date) > 0)
+                .select("trip_id")
+                .collect()["trip_id"]
+                .to_list()
+            )
+        )
         if ids in stats_by_ids:
             # Reuse stats with updated date
             stats = stats_by_ids[ids].pipe(hp.replace_date, date=date)
         elif ids:
             # Compute stats afresh
-            t = trip_stats.loc[lambda x: x.trip_id.isin(ids)].copy()
+            t = trip_stats.filter(pl.col("trip_id").is_in(ids))
             stats = compute_route_time_series_0(
-                t, split_directions=split_directions, freq=freq, date_label=date
+                t,
+                split_directions=split_directions,
+                num_minutes=num_minutes,
+                date_label=date,
             ).pipe(hp.replace_date, date=date)
             # Remember stats
             stats_by_ids[ids] = stats
@@ -955,4 +960,4 @@ def compute_route_time_series(
         frames.append(stats)
 
     # Collate stats
-    return pd.concat(frames, ignore_index=True)
+    return pl.concat(frames)
