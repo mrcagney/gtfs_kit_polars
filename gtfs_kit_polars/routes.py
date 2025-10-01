@@ -625,7 +625,7 @@ def compute_route_stats(
         feed.trips.head(0), split_directions=split_directions
     )
     final_cols = ["date"] + list(null_stats.collect_schema().names())
-    null_stats = null_stats.assign(date=None).filter(final_cols)
+    null_stats = null_stats.with_columns(date=None).select(final_cols)
     dates = feed.subset_dates(dates)
 
     # Handle defunct case
@@ -646,19 +646,26 @@ def compute_route_stats(
     activity = feed.compute_trip_activity(dates)
     frames = []
     for date in dates:
-        ids = tuple(sorted(activity.loc[activity[date] > 0, "trip_id"].values))
+        ids = tuple(
+            sorted(
+                activity.filter(pl.col(date) > 0)
+                .select("trip_id")
+                .collect()["trip_id"]
+                .to_list()
+            )
+        )
         if ids in stats_by_ids:
             # Reuse stats with updated date
-            stats = stats_by_ids[ids].assign(date=date)
+            stats = stats_by_ids[ids].with_columns(date=pl.lit(date))
         elif ids:
             # Compute stats afresh
-            t = trip_stats.loc[lambda x: x.trip_id.isin(ids)].copy()
+            t = trip_stats.filter(pl.col("trip_id").is_in(ids))
             stats = compute_route_stats_0(
                 t,
                 split_directions=split_directions,
                 headway_start_time=headway_start_time,
                 headway_end_time=headway_end_time,
-            ).assign(date=date)
+            ).with_columns(date=pl.lit(date))
             # Remember stats
             stats_by_ids[ids] = stats
         else:
@@ -672,7 +679,7 @@ def compute_route_stats(
         if split_directions
         else ["date", "route_id"]
     )
-    return pd.concat(frames).filter(final_cols).sort_values(sort_by)
+    return pl.concat(frames).select(final_cols).sort(sort_by)
 
 
 def compute_route_time_series_0(
