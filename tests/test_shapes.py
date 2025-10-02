@@ -3,74 +3,67 @@ import json
 import geopandas as gpd
 import shapely.geometry as sg
 
-from .context import gtfs_kit_polars, DATA_DIR, cairns, cairns_shapeless
-from gtfs_kit_polars import shapes as gks
 from gtfs_kit_polars import constants as cs
+from gtfs_kit_polars import helpers as gkh
+from gtfs_kit_polars import shapes as gks
+
+from .context import DATA_DIR, cairns, cairns_shapeless, gtfs_kit_polars
 
 
 def test_append_dist_to_shapes():
     feed1 = cairns.copy()
-    s1 = feed1.shapes
+    s1 = feed1.shapes.collect()
     feed2 = gks.append_dist_to_shapes(feed1)
-    s2 = feed2.shapes
-    # Check that colums of st2 equal the columns of st1 plus
-    # a shape_dist_traveled column
-    cols1 = list(s1.columns.values) + ["shape_dist_traveled"]
-    cols2 = list(s2.columns.values)
-    assert set(cols1) == set(cols2)
+    s2 = feed2.shapes.collect()
+    # Check columns are correct
+    assert set(s2.columns) == set(s1.columns) | {"shape_dist_traveled"}
 
     # Check that within each trip the shape_dist_traveled column
     # is monotonically increasing
-    for name, group in s2.groupby("shape_id"):
-        sdt = list(group["shape_dist_traveled"].values)
+    for group in s2.partition_by("shape_id"):
+        sdt = group["shape_dist_traveled"].to_list()
         assert sdt == sorted(sdt)
 
 
 def test_geometrize_shapes():
-    shapes = cairns.shapes.copy()
-    geo_shapes = gks.geometrize_shapes(shapes)
-    # Should be a GeoDataFrame
-    assert isinstance(geo_shapes, gpd.GeoDataFrame)
-    assert geo_shapes.crs == cs.WGS84
-    # Should have the correct shape
-    assert geo_shapes.shape[0] == shapes["shape_id"].nunique()
-    assert geo_shapes.shape[1] == shapes.shape[1] - 2
+    shapes = cairns.shapes.collect()
+    geo_shapes = gks.geometrize_shapes(shapes).collect()
+    # Should have the correct num rows
+    assert geo_shapes.height == shapes["shape_id"].n_unique()
     # Should have the correct columns
-    expect_cols = set(list(shapes.columns) + ["geometry"]) - set(
-        [
-            "shape_pt_lon",
-            "shape_pt_lat",
-            "shape_pt_sequence",
-            "shape_dist_traveled",
-        ]
-    )
-    assert set(geo_shapes.columns) == expect_cols
-    # A shape with only one point
-    shapes = cairns.shapes.iloc[:1]
+    assert set(geo_shapes.columns) == (set(shapes.columns) | {"geometry"}) - {
+        "shape_pt_lon",
+        "shape_pt_lat",
+        "shape_pt_sequence",
+        "shape_dist_traveled",
+    }
+    # Should have correct SRID
+    assert gkh.get_srid(geo_shapes) == cs.WGS84
+
+    # A shape with only one point should work
+    shapes = cairns.shapes.collect().head(1)
     geo_shapes = gks.geometrize_shapes(shapes)
-    assert isinstance(geo_shapes, gpd.GeoDataFrame)
-    assert geo_shapes.crs == cs.WGS84
+    print(geo_shapes.collect())
+    # Should have correct SRID
+    assert gkh.get_srid(geo_shapes) == cs.WGS84
 
 
 def test_ungeometrize_shapes():
-    shapes = cairns.shapes.copy()
-    geo_shapes = gks.geometrize_shapes(shapes)
-    print(geo_shapes)
-    shapes2 = gks.ungeometrize_shapes(geo_shapes)
+    shapes = cairns.shapes.collect()
+    geo_shapes = gks.geometrize_shapes(shapes).collect()
+    shapes2 = gks.ungeometrize_shapes(geo_shapes).collect()
 
     # Test columns are correct
-    expect_cols = set(list(shapes.columns)) - set(["shape_dist_traveled"])
-    assert set(shapes2.columns) == expect_cols
+    assert set(shapes2.columns) == set(list(shapes.columns)) - set(["shape_dist_traveled"])
 
     # Data frames should agree on certain columns
     cols = ["shape_id", "shape_pt_lon", "shape_pt_lat"]
-    print(shapes[cols])
-    assert shapes2[cols].equals(shapes[cols])
+    assert shapes2.select(cols).equals(shapes.select(cols))
 
 
 def test_get_shapes():
-    g = gks.get_shapes(cairns, as_geo=True)
-    assert g.crs == cs.WGS84
+    g = gks.get_shapes(cairns, as_geo=True).collect()
+    assert gkh.get_srid(g) == cs.WGS84
     assert set(g.columns) == {"shape_id", "geometry"}
     assert gks.get_shapes(cairns_shapeless, as_geo=True) is None
 

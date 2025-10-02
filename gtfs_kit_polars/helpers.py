@@ -22,6 +22,9 @@ import utm
 from . import constants as cs
 
 
+def make_lazy(f: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
+    return f if isinstance(f, pl.LazyFrame) else f.lazy()
+
 def are_equal(f: pl.DataFrame | pl.LazyFrame, g: pl.DataFrame | pl.LazyFrame) -> bool:
     """
     Return True if and only if the tables are equal after sorting column names

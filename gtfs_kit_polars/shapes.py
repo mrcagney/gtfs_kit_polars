@@ -3,13 +3,14 @@ Functions about shapes.
 """
 
 from __future__ import annotations
-from typing import Iterable, TYPE_CHECKING
-import json
 
-import polars as pl
-import polars_st as st
+import json
+from typing import TYPE_CHECKING, Iterable
+
 import geopandas as gpd
 import pandas as pd
+import polars as pl
+import polars_st as st
 import shapely
 import shapely.geometry as sg
 
@@ -36,14 +37,14 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
         raise ValueError("This function requires the feed to have a shapes.txt file")
 
     feed = feed.copy()
-    s = feed.shapes
 
-    lon, lat = s.limit(1).select("shape_pt_lon", "shape_pt_lat").collect().row(0)
+    lon, lat = feed.shapes.limit(1).select("shape_pt_lon", "shape_pt_lat").collect().row(0)
     utm_srid = hp.get_utm_srid_0(lon, lat)
     convert_dist = hp.get_convert_dist("m", feed.dist_units)
-    s = (
+    feed.shapes = (
         # Build point geometries in WGS84 then convert to UTM
-        s.sort("shape_id", "shape_pt_sequence")
+        feed.shapes
+        .sort("shape_id", "shape_pt_sequence")
         .with_columns(
             geometry=st.point(pl.concat_arr("shape_pt_lon", "shape_pt_lat"))
             .st.set_srid(cs.WGS84)
@@ -66,13 +67,12 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
         # Clean up
         .drop("geometry", "prev", "seg_m", "cum_m")
     )
-    feed.shapes = s
     return feed
 
 
 def geometrize_shapes(
     shapes: pl.DataFrame | pl.LazyFrame, *, use_utm: bool = False
-) -> pl.DataFrame | pl.LazyFrame:
+) -> pl.LazyFrame:
     """
     Given a GTFS shapes DataFrame, convert it to a GeoDataFrame of LineStrings
     and return the result, which will no longer have the columns
@@ -81,23 +81,30 @@ def geometrize_shapes(
 
     If ``use_utm``, then use local UTM coordinates for the geometries.
     """
-    g = (
-        shapes.sort(["shape_id", "shape_pt_sequence"])
+    f = (
+        hp.make_lazy(shapes)
+        .sort("shape_id", "shape_pt_sequence")
         .group_by("shape_id", maintain_order=True)
         .agg(
             coords=pl.concat_list("shape_pt_lon", "shape_pt_lat"),
             n=pl.len(),
         )
-        .with_columns(
-            geometry=(
-                pl.when(pl.col("n") >= 2)
-                .then(st.linestring("coords"))
-                .otherwise(st.point(pl.col("coords").list.get(0)))
-            )
-        )
-        .with_columns(geometry=pl.col("geometry").st.set_srid(4326))
+    )
+    lines = (
+        f
+        .filter(pl.col("n") >= 2)
+        .with_columns(geometry = st.linestring("coords").st.set_srid(4326))
         .select("shape_id", "geometry")
     )
+    points = (
+        f
+        .filter(pl.col("n") == 1)
+        .with_columns(
+            geometry = st.point(pl.col("coords").list.get(0)).st.set_srid(4326)
+        )
+        .select("shape_id", "geometry")
+    )
+    g = pl.concat([lines, points])
 
     if use_utm:
         lon, lat = (
@@ -109,7 +116,7 @@ def geometrize_shapes(
     return g
 
 
-def ungeometrize_shapes(shapes_g):
+def ungeometrize_shapes(shapes_g: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
     """
     The inverse of :func:`geometrize_shapes`.
 
@@ -118,7 +125,7 @@ def ungeometrize_shapes(shapes_g):
     standard for a GTFS shapes table.
     """
     return (
-        shapes_g
+        hp.make_lazy(shapes_g)
         # Reproject to WGS84
         .with_columns(geometry=pl.col("geometry").st.to_srid(cs.WGS84))
         .select("shape_id", coords=pl.col("geometry").st.coordinates())
@@ -252,7 +259,7 @@ def split_simple(
 
 def get_shapes(
     feed: "Feed", *, as_geo: bool = False, use_utm: bool = False
-) -> gpd.DataFrame | None:
+) -> pl.LazyFrame | None:
     """
     Get the shapes DataFrame for the given feed, which could be ``None``.
     If ``as_geo``, then return it as GeoDataFrame with a 'geometry' column
