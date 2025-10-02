@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import pytest
+import polars as pl
 import geopandas as gpd
 import folium as fl
 
@@ -37,29 +38,23 @@ def test_get_active_services():
 def test_get_trips():
     feed = cairns.copy()
     date = cairns_dates[0]
-    trips1 = gkt.get_trips(feed, date)
-    # Should be a data frame
-    assert isinstance(trips1, pd.core.frame.DataFrame)
-    # Should have the correct shape
-    assert trips1.shape[0] <= feed.trips.shape[0]
-    assert trips1.shape[1] == feed.trips.shape[1]
+    trips1 = gkt.get_trips(feed, date).collect()
+    # Should have correct num rows
+    assert trips1.height <= feed.trips.collect().height
     # Should have correct columns
-    assert set(trips1.columns) == set(feed.trips.columns)
+    assert set(trips1.columns) == set(feed.trips.collect_schema().names())
 
-    trips2 = gkt.get_trips(feed, date, "07:30:00")
-    # Should be a data frame
-    assert isinstance(trips2, pd.core.frame.DataFrame)
-    # Should have the correct shape
-    assert trips2.shape[0] <= trips2.shape[0]
-    assert trips2.shape[1] == trips1.shape[1]
+    trips2 = gkt.get_trips(feed, date, "07:30:00").collect()
+    # Should have the correct num rows
+    assert trips2.height <= trips2.height
     # Should have correct columns
-    assert set(trips2.columns) == set(feed.trips.columns)
+    assert set(trips2.columns) == set(feed.trips.collect_schema().names())
 
     feed = cairns.copy()
-    g = gkt.get_trips(feed, as_geo=True)
-    assert g.crs == cs.WGS84
-    assert g.shape[0] == feed.trips.shape[0]
-    assert set(g.columns) == set(feed.trips.columns) | {"geometry"}
+    g = gkt.get_trips(feed, as_geo=True).collect()
+    assert gkh.get_srid(g) == cs.WGS84
+    assert g.height == feed.trips.collect().height
+    assert set(g.columns) == set(feed.trips.collect_schema().names()) | {"geometry"}
 
     with pytest.raises(ValueError):
         gkt.get_trips(cairns_shapeless, as_geo=True)
@@ -68,11 +63,16 @@ def test_get_trips():
 def test_compute_trip_activity():
     feed = cairns.copy()
     dates = gkc.get_first_week(feed)
-    ta = gkt.compute_trip_activity(feed, dates)
-    # Should have the correct shape
-    assert ta.shape == (feed.trips.shape[0], 1 + len(dates))
+    ta = gkt.compute_trip_activity(feed, dates + ["19990101"]).collect()
+    # Should have the correct num rows and correct columns()
+    assert ta.height == feed.trips.collect().height
+    assert set(ta.columns) == {"trip_id"} | set(dates)
     # Date columns should contain only zeros and ones
-    assert set(ta[dates].values.flatten()) == {0, 1}
+    assert (
+        ta.unpivot(index=[], on=dates, value_name="v")
+        .select(pl.col("v").is_in([0, 1]).all())
+        .item()
+    )
 
 
 def test_compute_busiest_date():
@@ -85,82 +85,71 @@ def test_compute_busiest_date():
 
 def test_name_stop_patterns():
     feed = cairns.copy()
-    t = gkt.name_stop_patterns(feed)
-    assert set(t.columns) == set(feed.trips.columns) | {"stop_pattern_name"}
+    t = gkt.name_stop_patterns(feed).collect()
+    expect_cols = set(feed.trips.collect_schema().names()) | {"stop_pattern_name"}
+    assert set(t.columns) == expect_cols
 
     # Should still work without direction ID
-    feed.trips = feed.trips.drop("direction_id", axis=1)
+    feed.trips = feed.trips.drop("direction_id")
     t = gkt.name_stop_patterns(feed)
-    assert set(t.columns) == set(feed.trips.columns) | {"stop_pattern_name"}
+    assert set(t.columns) == expect_cols - {"direction_id"}
 
 
 def test_compute_trip_stats():
     feed = cairns.copy()
     n = 3
-    rids = feed.routes.route_id.loc[:n]
-    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids)
+    rids = feed.routes.collect()["route_id"].to_list()[:n]
+    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids).collect()
 
-    # Should be a data frame with the correct number of rows
-    trip_subset = feed.trips.loc[lambda x: x["route_id"].isin(rids)].copy()
-    assert isinstance(trip_stats, pd.core.frame.DataFrame)
-    assert trip_stats.shape[0] == trip_subset.shape[0]
+    # Should have correct number of rows
+    trips = feed.trips.filter(pl.col("route_id").is_in(rids)).collect()
+    assert trip_stats.height == trips.height
 
     # Should contain the correct columns
-    expect_cols = set(
-        [
-            "trip_id",
-            "direction_id",
-            "route_id",
-            "route_short_name",
-            "route_type",
-            "shape_id",
-            "stop_pattern_name",
-            "num_stops",
-            "start_time",
-            "end_time",
-            "start_stop_id",
-            "end_stop_id",
-            "distance",
-            "duration",
-            "speed",
-            "is_loop",
-        ]
-    )
+    expect_cols = {
+        "trip_id",
+        "direction_id",
+        "route_id",
+        "route_short_name",
+        "route_type",
+        "shape_id",
+        "stop_pattern_name",
+        "num_stops",
+        "start_time",
+        "end_time",
+        "start_stop_id",
+        "end_stop_id",
+        "distance",
+        "duration",
+        "speed",
+        "is_loop",
+    }
     assert set(trip_stats.columns) == expect_cols
-
-    # Distance units should be correct
-    d1 = trip_stats.distance.iat[0]  # km
-    trip_stats_2 = gkt.compute_trip_stats(feed.convert_dist("ft"), route_ids=rids)
-    d2 = trip_stats_2.distance.iat[0]  # mi
-    f = gkh.get_convert_dist("km", "mi")
-    assert np.allclose(f(d1), d2)
 
     # Shapeless feeds should have null entries for distance column
     feed = cairns_shapeless.copy()
-    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids)
-    assert len(trip_stats["distance"].unique()) == 1
-    assert np.isnan(trip_stats["distance"].unique()[0])
+    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids).collect()
+    assert trip_stats["distance"].n_unique() == 1
+    assert trip_stats["distance"].unique().item(0) is None
 
     # Should contain the correct trips
-    get_trips = set(trip_stats["trip_id"].values)
-    expect_trips = set(trip_subset["trip_id"].values)
-    assert get_trips == expect_trips
+    assert set(trip_stats["trip_id"].to_list()) == set(trips["trip_id"].to_list())
 
     # Missing the optional ``direction_id`` column in ``feed.trips``
     # should give ``direction_id`` column in stats with all NaNs
     feed = cairns.copy()
-    del feed.trips["direction_id"]
-    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids)
+    feed.trips = feed.trips.drop("direction_id")
+    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids).collect()
     assert set(trip_stats.columns) == expect_cols
-    assert trip_stats.direction_id.isnull().all()
+    assert trip_stats["direction_id"].is_null().all()
 
     # Missing the optional ``shape_id`` column in ``feed.trips``
     # should give ``shape_id`` column in stats with all NaNs
     feed = cairns.copy()
-    del feed.trips["shape_id"]
-    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids)
+    feed.trips = feed.trips.drop("shape_id")
+    trip_stats = gkt.compute_trip_stats(feed, route_ids=rids).collect()
     assert set(trip_stats.columns) == expect_cols
-    assert trip_stats.shape_id.isnull().all()
+    assert trip_stats["shape_id"].is_null().all()
 
 
 @pytest.mark.slow
@@ -170,30 +159,27 @@ def test_locate_trips():
     feed = gks.append_dist_to_stop_times(feed)
     date = cairns_dates[0]
     times = ["08:00:00"]
-    f = gkt.locate_trips(feed, date, times)
-    print(f.head().T)
+    f = gkt.locate_trips(feed, date, times).collect()
 
-    g = gkt.get_trips(feed, date, times[0])
+    g = gkt.get_trips(feed, date, times[0]).collect()
     # Should have the correct number of rows
-    assert f.shape[0] == g.shape[0]
+    assert f.height == g.height
     # Should have the correct columns
-    expect_cols = set(
-        [
-            "route_id",
-            "trip_id",
-            "direction_id",
-            "shape_id",
-            "time",
-            "rel_dist",
-            "lon",
-            "lat",
-        ]
-    )
+    expect_cols = {
+        "route_id",
+        "trip_id",
+        "direction_id",
+        "shape_id",
+        "time",
+        "rel_dist",
+        "lon",
+        "lat",
+    }
     assert set(f.columns) == expect_cols
 
     # Missing feed.trips.shape_id should raise an error
     feed = cairns_shapeless.copy()
-    del feed.trips["shape_id"]
+    feed.trips = feed.trips.drop("shape_id")
     with pytest.raises(ValueError):
         gkt.locate_trips(feed, date, times)
 

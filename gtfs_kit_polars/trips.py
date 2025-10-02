@@ -98,20 +98,19 @@ def get_trips(
         if time is not None:
             # Get trips active during given time
             f = (
-                f.join_where(
-                    feed.stop_times["trip_id", "departure_time"],
-                    pl.col("trip_id") == feed.stop_times["trip_id"],
+                f.join(
+                    feed.stop_times.select("trip_id", "departure_time"),
+                    on="trip_id",
                 )
-                .group_by("trip_id")
                 .with_columns(
                     is_active=(
                         (pl.col("departure_time").min() <= time)
                         & (pl.col("departure_time").max() >= time)
-                    )
+                    ).over("trip_id")
                 )
                 .filter(pl.col("is_active"))
                 .drop("departure_time", "is_active")
-                .distinct(on="trip_id")
+                .unique("trip_id")
             )
 
     if as_geo:
@@ -122,15 +121,15 @@ def get_trips(
 
             f = (
                 get_shapes(feed, as_geo=True, use_utm=use_utm)
-                .select(["shape_id", "geometry", "crs"])
-                .join(f, on=f["shape_id"], how="right")
-                .select(list(f.collect_schema().names()) + ["geometry", "crs"])
+                .select("shape_id", "geometry")
+                .join(f, "shape_id", how="right")
+                .select(list(f.collect_schema().names()) + ["geometry"])
             )
 
     return f
 
 
-def compute_trip_activity(feed: "Feed", dates: list[str]) -> pd.DataFrame:
+def compute_trip_activity(feed: "Feed", dates: list[str]) -> pd.LazyFrame:
     """
     Mark trips as active or inactive on the given dates (YYYYMMDD date strings).
     Return a table with the columns
@@ -170,7 +169,7 @@ def compute_busiest_date(feed: "Feed", dates: list[str]) -> str:
     maximum number of active trips.
     """
     f = feed.compute_trip_activity(dates)
-    s = [(f[c].sum(), c) for c in f.columns if c != "trip_id"]
+    s = [(f.select(c).sum(), c) for c in f.collect_schema().names() if c != "trip_id"]
     return max(s)[1]
 
 
@@ -187,27 +186,32 @@ def name_stop_patterns(feed: "Feed") -> pl.LazyFrame:
     If ``feed.trips`` has no 'direction_id' column, then temporarily create one equal
     to all zeros, proceed as above, then delete the column.
     """
-    t = feed.trips
-    has_dir = "direction_id" in t.collect_schema().names()
-    tt = t if has_dir else t.with_columns(pl.lit(0).alias("direction_id"))
+    has_dir = "direction_id" in feed.trips.collect_schema().names()
+    # Add direction ID placeholder when needed to ease calcs
+    trips = (
+        feed.trips
+        if has_dir
+        else feed.trips.with_columns(pl.lit(0).alias("direction_id"))
+    )
 
     # Per-trip stop pattern (ordered stop_ids joined with "-")
-    s = (
+    f = (
+        # Get stop patterns
         feed.stop_times.sort(["trip_id", "stop_sequence"])
         .group_by("trip_id", maintain_order=True)
         .agg(stop_ids=pl.col("stop_id").implode())
         .with_columns(stop_pattern=pl.col("stop_ids").list.join("-"))
         .select(["trip_id", "stop_pattern"])
+        # Attached trip metadat
+        .join(
+            trips.select("route_id", "trip_id", "direction_id"),
+            on="trip_id",
+            how="inner",
+        )
     )
-
-    # Attach trip metadata
-    f = s.join(
-        tt.select(["route_id", "trip_id", "direction_id"]), on="trip_id", how="inner"
-    )
-
-    # Count frequency of each stop_pattern within (route_id, direction_id)
-    c = (
-        f.group_by(["route_id", "direction_id", "stop_pattern"])
+    # Rank each stop_pattern frequency within (route_id, direction_id)
+    ranks = (
+        f.group_by("route_id", "direction_id", "stop_pattern")
         .agg(n=pl.len())
         .with_columns(
             # rank 1 = most frequent within (route_id, direction_id)
@@ -215,25 +219,24 @@ def name_stop_patterns(feed: "Feed") -> pl.LazyFrame:
             .rank(method="dense", descending=True)
             .over(["route_id", "direction_id"])
         )
-        .select(["route_id", "direction_id", "stop_pattern", "rank"])
+        .select("route_id", "direction_id", "stop_pattern", "rank")
     )
-
-    # Join ranks back and build "direction-rank" names
-    g = (
-        f.join(c, on=["route_id", "direction_id", "stop_pattern"], how="left")
+    # Assign pattern names based on rank
+    f = (
+        f.join(ranks, on=["route_id", "direction_id", "stop_pattern"], how="left")
         .with_columns(
             stop_pattern_name=pl.concat_str(
                 [pl.col("direction_id").cast(pl.Utf8), pl.col("rank").cast(pl.Utf8)],
                 separator="-",
             )
         )
-        .select(["trip_id", "stop_pattern_name"])
+        .select("trip_id", "stop_pattern_name")
     )
 
-    out = tt.join(g, on="trip_id", how="left")
+    result = trips.join(f, on="trip_id", how="left")
     if not has_dir:
-        out = out.drop("direction_id")
-    return out
+        result = result.drop("direction_id")
+    return result
 
 
 def compute_trip_stats(
@@ -302,7 +305,7 @@ def compute_trip_stats(
     if "direction_id" not in t.collect_schema().names():
         t = t.with_columns(pl.lit(None).alias("direction_id"))
     if "shape_id" not in t.collect_schema().names():
-        t = t.with_columns(pl.lit(None).alias("shape_id"))
+        t = t.with_columns(pl.lit(None, pl.Utf8).alias("shape_id"))
 
     # Join with stop_times and convert departure times to seconds
     t = (
@@ -426,7 +429,7 @@ def compute_trip_stats(
     )
 
 
-def locate_trips(feed: "Feed", date: str, times: list[str]) -> pd.DataFrame:
+def locate_trips(feed, date: str, times: list[str]) -> pl.LazyFrame:
     """
     Return the positions of all trips active on the
     given date (YYYYMMDD date string) and times (HH:MM:SS time strings,
@@ -435,8 +438,9 @@ def locate_trips(feed: "Feed", date: str, times: list[str]) -> pd.DataFrame:
     Return a DataFrame with the columns
 
     - ``'trip_id'``
+    - ``'shape_id'``
     - ``'route_id'``
-    - ``'direction_id'``: all NaNs if ``feed.trips.direction_id`` is
+    - ``'direction_id'``: null if ``feed.trips.direction_id`` is
       missing
     - ``'time'``
     - ``'rel_dist'``: number between 0 (start) and 1 (end)
@@ -444,76 +448,146 @@ def locate_trips(feed: "Feed", date: str, times: list[str]) -> pd.DataFrame:
     - ``'lon'``: longitude of trip at given time
     - ``'lat'``: latitude of trip at given time
 
-    Assume ``feed.stop_times`` has an accurate
-    ``shape_dist_traveled`` column.
+    Assume ``feed.stop_times`` has an accurate ``shape_dist_traveled`` column.
     """
-    if not hp.is_not_null(feed.stop_times, "shape_dist_traveled"):
+    # Validate required columns
+    if "shape_dist_traveled" not in feed.stop_times.collect_schema().names():
         raise ValueError(
-            "feed.stop_times needs to have a non-null shape_dist_traveled "
-            "column. You can create it, possibly with some inaccuracies, "
-            "via feed2 = feed.append_dist_to_stop_times()."
+            "feed.stop_times needs non-null shape_dist_traveled; "
+            "create it with feed.append_dist_to_stop_times()"
         )
-
-    if "shape_id" not in feed.trips.columns:
+    if "shape_id" not in feed.trips.collect_schema().names():
         raise ValueError("feed.trips.shape_id must exist.")
 
-    # Start with stop times active on date
-    f = feed.get_stop_times(date)
-    f["departure_time"] = f["departure_time"].map(hp.timestr_to_seconds)
+    # Trips active on date (ensure direction_id exists)
+    trips = feed.get_trips(date)
+    if "direction_id" not in trips.collect_schema().names():
+        trips = trips.with_columns(pl.lit(None, dtype=pl.Int32).alias("direction_id"))
 
-    # Compute relative distance of each trip along its path
-    # at the given time times.
-    # Use linear interpolation based on stop departure times and
-    # shape distance traveled.
-    geometry_by_shape = feed.build_geometry_by_shape(use_utm=False)
-    sample_times = np.array([hp.timestr_to_seconds(s) for s in times])
+    # Trip lengths and target times
+    trip_lengths = feed.stop_times.group_by("trip_id").agg(
+        trip_length=pl.col("shape_dist_traveled").max()
+    )
+    times = pl.DataFrame(
+        [{"time": t, "time_s": hp.timestr_to_seconds_0(t)} for t in times],
+        schema={"time": pl.Utf8, "time_s": pl.Int32},
+    ).lazy()
 
-    def compute_rel_dist(group):
-        dists = sorted(group["shape_dist_traveled"].values)
-        times = sorted(group["departure_time"].values)
-        ts = sample_times[(sample_times >= times[0]) & (sample_times <= times[-1])]
-        ds = np.interp(ts, times, dists)
-        return pd.DataFrame({"time": ts, "rel_dist": ds / dists[-1]})
+    st = (
+        # Reshape stop times into segments with time bounds [t0, t1] and
+        # distance bounds [d0, d1]
+        feed.stop_times.with_columns(
+            dtime=hp.timestr_to_seconds("departure_time"),
+            shape_dist_traveled=pl.col("shape_dist_traveled").cast(pl.Float64),
+        )
+        .sort("dtime", "stop_sequence")
+        .with_columns(
+            t0=pl.col("dtime"),
+            t1=pl.col("dtime").shift(-1).over("trip_id"),
+            d0=pl.col("shape_dist_traveled"),
+            d1=pl.col("shape_dist_traveled").shift(-1).over("trip_id"),
+        )
+        .filter(pl.col("t1").is_not_null())
+        # explode-friendly shape
+        .group_by("trip_id")
+        .agg(
+            t0=pl.col("t0"),
+            t1=pl.col("t1"),
+            d0=pl.col("d0"),
+            d1=pl.col("d1"),
+        )
+        .explode(["t0", "t1", "d0", "d1"])
+        # Interpolate relative distances at requested times per trip (in stop-time domain)
+        .join(trip_lengths, on="trip_id")
+        .join(feed.trips.select("trip_id", "shape_id"), on="trip_id")
+        .join(times, how="cross")
+        .filter((pl.col("time_s") >= pl.col("t0")) & (pl.col("time_s") <= pl.col("t1")))
+        # Could have introduced duplicates on boundary overlap above so dedup later.
+        # Linearly interpolate distances of sample times.
+        .with_columns(
+            denom=(pl.col("t1") - pl.col("t0")).cast(pl.Float64),
+        )
+        .with_columns(
+            r=pl.when(pl.col("denom") == 0.0)
+            .then(0.0)
+            .otherwise(
+                (pl.col("time_s") - pl.col("t0")).cast(pl.Float64) / pl.col("denom")
+            ),
+        )
+        .with_columns(
+            rel_dist=(pl.col("d0") + pl.col("r") * (pl.col("d1") - pl.col("d0")))
+            / pl.col("trip_length"),
+        )
+        .select("trip_id", "shape_id", "time", "rel_dist")
+        # Add in trip info and restrict to trips on given date
+        .join(
+            trips.select("trip_id", "route_id", "direction_id"),
+            on="trip_id",
+        )
+    )
+    # Ensure shapes have cumulative distances; compute if missing
+    if "shape_dist_traveled" not in feed.shapes.collect_schema().names():
+        from . import shapes as shapes_mod
 
-    # return f.groupby('trip_id', group_keys=False).\
-    #   apply(compute_rel_dist).reset_index()
-    g = f.groupby("trip_id").apply(compute_rel_dist, include_groups=False).reset_index()
+        feed = shapes_mod.append_dist_to_shapes(feed)
 
-    # Delete extraneous multi-index column
-    del g["level_1"]
+    # Get shape segemnts with distance bounds [d0, d1] and lon-lat bounds [lon0, lon1], [lat0, lat1]
+    shapes = (
+        feed.shapes.sort(["shape_id", "shape_pt_sequence"])
+        .with_columns(
+            d0=pl.col("shape_dist_traveled"),
+            d1=pl.col("shape_dist_traveled").shift(-1).over(["shape_id"]),
+            lon0=pl.col("shape_pt_lon"),
+            lon1=pl.col("shape_pt_lon").shift(-1).over(["shape_id"]),
+            lat0=pl.col("shape_pt_lat"),
+            lat1=pl.col("shape_pt_lat").shift(-1).over(["shape_id"]),
+        )
+        .filter(pl.col("d1").is_not_null())
+        .select("shape_id", "d0", "d1", "lon0", "lon1", "lat0", "lat1")
+    )
 
-    # Convert times back to time strings
-    g["time"] = g["time"].map(lambda x: hp.seconds_to_timestr(x))
+    # Shape lengths (to scale rel_dist -> absolute along-shape dist)
+    shape_lengths = feed.shapes.group_by("shape_id").agg(
+        shape_length=pl.col("shape_dist_traveled").max()
+    )
 
-    # Merge in more trip info and
-    # compute longitude and latitude of trip from relative distance
-    t = feed.trips.copy()
-    if "direction_id" not in t.columns:
-        t["direction_id"] = np.nan
-
-    h = pd.merge(g, t[["trip_id", "route_id", "direction_id", "shape_id"]])
-    if not h.shape[0]:
-        # Return a DataFrame with the promised headers but no data.
-        # Without this check, result below could be an empty DataFrame.
-        h["lon"] = pd.Series()
-        h["lat"] = pd.Series()
-        return h
-
-    def get_lonlat(group):
-        shape = group.name
-        linestring = geometry_by_shape[shape]
-        lonlats = [
-            linestring.interpolate(d, normalized=True).coords[0]
-            for d in group["rel_dist"].values
-        ]
-        group["lon"], group["lat"] = zip(*lonlats)
-        return group
-
+    # Interpolate lon/lat for each (trip_id, time) via matching shape segment
     return (
-        h.groupby("shape_id")
-        .apply(get_lonlat, include_groups=False)
-        .reset_index()
-        .drop("level_1", axis=1)  # Where did this column come from?
+        st.join(shape_lengths, on="shape_id")
+        .with_columns(shape_rel_dist=pl.col("rel_dist") * pl.col("shape_length"))
+        .join(shapes, on="shape_id")
+        .filter(
+            (pl.col("shape_rel_dist") >= pl.col("d0"))
+            & (pl.col("shape_rel_dist") <= pl.col("d1"))
+        )
+        # Could have introduced duplicates on boundary overlap above so dedup later,
+        # Linearly interpolate lon-lats from relative shape relative dists.
+        .with_columns(
+            denom=(pl.col("d1") - pl.col("d0")).cast(pl.Float64),
+        )
+        .with_columns(
+            r=pl.when(pl.col("denom") == 0.0)
+            .then(0.0)
+            .otherwise(
+                (pl.col("shape_rel_dist") - pl.col("d0")).cast(pl.Float64)
+                / pl.col("denom")
+            ),
+        )
+        .with_columns(
+            lon=pl.col("lon0") + pl.col("r") * (pl.col("lon1") - pl.col("lon0")),
+            lat=pl.col("lat0") + pl.col("r") * (pl.col("lat1") - pl.col("lat0")),
+        )
+        .select(
+            "trip_id",
+            "shape_id",
+            "route_id",
+            "direction_id",
+            "time",
+            "rel_dist",
+            "lon",
+            "lat",
+        )
+        .unique(subset=["trip_id", "time"], keep="first")
     )
 
 

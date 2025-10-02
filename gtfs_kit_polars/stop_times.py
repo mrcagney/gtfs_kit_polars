@@ -31,6 +31,7 @@ def get_stop_times(feed: "Feed", date: str | None = None) -> pl.LazyFrame:
     return st
 
 
+# TODO: Rewrite because way too slow
 def append_dist_to_stop_times(feed: "Feed") -> "Feed":
     """
     Calculate and append the optional ``shape_dist_traveled`` column in
@@ -53,86 +54,135 @@ def append_dist_to_stop_times(feed: "Feed") -> "Feed":
     distances and use them and their corresponding departure times to linearly
     interpolate the rest of the distances.
     """
-    if feed.shapes is None or feed.shapes.is_empty():
+    if feed.shapes is None or hp.is_empty(feed.shapes):
         return feed
 
-    # Get stop and shape geometries as dictionaries
+    # Geometry dicts in meters
     geom_by_stop = feed.build_geometry_by_stop(use_utm=True)
     geom_by_shape = feed.build_geometry_by_shape(use_utm=True)
 
-    # Memoize distance by stop by shape to avoid repeating calculations
-    dist_by_stop_by_shape = {shape: {} for shape in geom_by_shape}
+    # Memoize per (shape_id, stop_id)
+    dist_by_stop_by_shape = {k: {} for k in geom_by_shape}
 
-    def compute_dist(group):
-        g = group.copy()
+    # def compute_dist(group):
+    #     g = group.copy()
 
-        # Compute the distances of the stops along this trip and memoize.
-        shape = g.shape_id.iat[0]
-        if pd.isna(shape):
-            g["shape_dist_traveled"] = np.nan
+    #     # Compute the distances of the stops along this trip and memoize.
+    #     shape = g.shape_id.iat[0]
+    #     linestring = geom_by_shape[shape]
+    #     dists = []
+    #     for stop in g.stop_id.values:
+    #         if stop in dist_by_stop_by_shape[shape]:
+    #             d = dist_by_stop_by_shape[shape][stop]
+    #         else:
+    #             d = linestring.project(geom_by_stop[stop])
+    #             dist_by_stop_by_shape[shape][stop] = d
+    #         dists.append(d)
+
+    #     s = sorted(dists)
+    #     D = linestring.length
+    #     dists_are_reasonable = all([d < D + 100 for d in dists])
+
+    #     if dists_are_reasonable and s == dists:
+    #         # Good
+    #         g["shape_dist_traveled"] = dists
+    #     elif dists_are_reasonable and s == dists[::-1]:
+    #         # Good after reversal.
+    #         # This happens when the direction of the linestring
+    #         # opposes the direction of the vehicle trip.
+    #         dists = dists[::-1]
+    #         g["shape_dist_traveled"] = dists
+    #     else:
+    #         # Bad. Redo using interpolation on a good subset of dists.
+    #         dists = np.array([0] + dists[1:-1] + [D])
+    #         ix = hp.longest_subsequence(dists, index=True)
+    #         good_dists = np.take(dists, ix)
+    #         g["shape_dist_traveled"] = np.interp(
+    #             g["dtime"], g.iloc[ix]["dtime"], good_dists
+    #         )
+
+    #         # Update dist dictionary with new and improved dists
+    #         for row in g[["stop_id", "shape_dist_traveled"]].itertuples(index=False):
+    #             dist_by_stop_by_shape[shape][row.stop_id] = row.shape_dist_traveled
+
+    #     return g
+
+    def compute_dist(group: pl.DataFrame) -> pl.DataFrame:
+        g = group.clone()
+        shape = g["shape_id"][0]
+        if shape is None or (isinstance(shape, float) and np.isnan(shape)):
+            # No shape -> all NaN
+            g = g.with_columns(pl.lit(None, pl.Float64).alias("shape_dist_traveled"))
         else:
             linestring = geom_by_shape[shape]
             dists = []
-            for stop in g.stop_id.values:
-                if stop in dist_by_stop_by_shape[shape]:
-                    d = dist_by_stop_by_shape[shape][stop]
+            cache = dist_by_stop_by_shape[shape]
+            for stop in g["stop_id"]:
+                if stop in cache:
+                    d = cache[stop]
                 else:
                     d = linestring.project(geom_by_stop[stop])
-                    dist_by_stop_by_shape[shape][stop] = d
+                    cache[stop] = d
                 dists.append(d)
 
             s = sorted(dists)
             D = linestring.length
-            dists_are_reasonable = all([d < D + 100 for d in dists])
+            dists_are_reasonable = all(d < D + 100 for d in dists)
 
             if dists_are_reasonable and s == dists:
-                # Good
-                g["shape_dist_traveled"] = dists
+                pass  # already good
             elif dists_are_reasonable and s == dists[::-1]:
-                # Good after reversal.
-                # This happens when the direction of the linestring
-                # opposes the direction of the vehicle trip.
-                dists = dists[::-1]
-                g["shape_dist_traveled"] = dists
+                dists = dists[::-1]  # reversed trip direction vs. shape direction
             else:
                 # Bad. Redo using interpolation on a good subset of dists.
-                dists = np.array([0] + dists[1:-1] + [D])
-                ix = hp.longest_subsequence(dists, index=True)
-                good_dists = np.take(dists, ix)
-                g["shape_dist_traveled"] = np.interp(
-                    g["departure_time_s"], g.iloc[ix]["departure_time_s"], good_dists
-                )
+                arr = np.array([0] + dists[1:-1] + [D], dtype=float)
+                ix = hp.longest_subsequence(arr, index=True)
+                good_dists = np.take(arr, ix)
+                times = g["dtime"].to_numpy()
+                good_times = times[ix]
+                dists = np.interp(times, good_times, good_dists).tolist()
 
-                # Update dist dictionary with new and improved dists
-                for row in g[["stop_id", "shape_dist_traveled"]].itertuples(
-                    index=False
-                ):
-                    dist_by_stop_by_shape[shape][row.stop_id] = row.shape_dist_traveled
+                # Update cache with improved values
+                for stop, d in zip(g["stop_id"], dists):
+                    cache[stop] = d
+
+            g = g.with_columns(pl.Series("shape_dist_traveled", dists))
 
         return g
 
-    cols = [c for c in feed.stop_times.columns if c != "shape_dist_traveled"]
-    new_cols = cols + ["shape_dist_traveled"]
-
-    m_to_dist = hp.get_convert_dist("m", feed.dist_units)
+    # Apply per-trip computation in eager, then convert units and return to lazy
+    # Columns from original stop_times to keep and final set with the new distance column
+    cols = [
+        c
+        for c in feed.stop_times.collect_schema().names()
+        if c != "shape_dist_traveled"
+    ]
+    final_cols = cols + ["shape_dist_traveled"]
+    convert_dist = hp.get_convert_dist("m", feed.dist_units)
     st = (
-        feed.stop_times.filter(cols)
-        .merge(feed.trips.filter(["trip_id", "shape_id"]))
-        # Convert departure times to seconds to ease calculatios
-        .assign(departure_time_s=lambda x: x.departure_time.map(hp.timestr_to_seconds))
-        .sort_values(["trip_id", "stop_sequence"])
-        .groupby("trip_id")
-        .apply(compute_dist, include_groups=False)
-        .reset_index()
-        # Convert distances from meters to feed's distance units
-        .assign(
-            shape_dist_traveled=lambda x: x.shape_dist_traveled.map(
-                m_to_dist, na_action="ignore"
-            )
+        feed.stop_times.select(cols)
+        .join(feed.trips.select("trip_id", "shape_id"), on="trip_id", how="left")
+        .with_columns(dtime=hp.timestr_to_seconds("departure_time"))
+        .sort("trip_id", "stop_sequence")
+        .collect()
+        # Cheating here
+        # .to_pandas()
+        # .groupby("trip_id")
+        # .apply(compute_dist, include_groups=False)
+        # .reset_index()
+        # .pipe(pl.from_pandas)
+        .group_by("trip_id")
+        .map_groups(compute_dist)
+        # Convert from meters to feed units
+        .with_columns(
+            pl.when(pl.col("shape_dist_traveled").is_not_null())
+            .then(convert_dist(pl.col("shape_dist_traveled")))
+            .otherwise(None)
+            .alias("shape_dist_traveled")
         )
-        .filter(new_cols)
+        .select(final_cols)
+        .lazy()
     )
-
     # Create new feed
     new_feed = feed.copy()
     new_feed.stop_times = st

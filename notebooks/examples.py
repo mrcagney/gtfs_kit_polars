@@ -21,7 +21,7 @@ def _():
 
     DATA = pb.Path("data")
     DESK = pb.Path.home() / "Desktop"
-    return DATA, DESK, gk, pl
+    return DATA, gk, pl
 
 
 @app.cell
@@ -33,12 +33,12 @@ def _(DATA, gk):
 
 
 @app.cell
-def _(DESK, gk):
+def _(DATA, gk):
     # Read feed and describe
 
-    feed = gk.read_feed(DESK / "auckland_gtfs_20250918.zip", dist_units="km")
-
-    # feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="m")
+    #feed = gk.read_feed(DESK / "auckland_gtfs_20250918.zip", dist_units="km")
+    feed0 = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="m")
+    feed = feed0.append_dist_to_stop_times()
     # feed.describe()
     return (feed,)
 
@@ -52,22 +52,33 @@ def _(feed):
 
 
 @app.cell
+def _(dates, feed, pl):
+    time = "23:00:00"
+    t = ( 
+        feed.get_trips(dates[0])
+        .join(
+            feed.stop_times.select("trip_id", "departure_time"),
+            on="trip_id",
+        )
+        .with_columns(
+            is_active=((pl.col("departure_time").min() <= time)
+            & (pl.col("departure_time").max() >= time)).over("trip_id")
+        )
+        .filter(pl.col("is_active"))
+        .drop("departure_time")
+        .unique("trip_id")
+    )
+    t.collect()
+
+    return
+
+
+@app.cell
 def _(feed):
     # Trip stats; reuse these for later speed ups
 
     trip_stats = feed.compute_trip_stats(compute_dist_from_shapes=False)
     trip_stats.collect()
-    return
-
-
-@app.cell
-def _(DATA, gk, pl):
-    ts = pl.read_csv(
-        DATA / "cairns_trip_stats_2.csv",
-        schema_overrides=(gk.DTYPES["trips"] | gk.DTYPES["routes"]),
-    )
-    #ts.write_csv(DATA / "cairns_trip_stats_2.csv")
-    gk.compute_route_stats_0(ts).collect()
     return
 
 

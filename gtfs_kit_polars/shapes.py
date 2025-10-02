@@ -40,7 +40,7 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
 
     lon, lat = s.limit(1).select("shape_pt_lon", "shape_pt_lat").collect().row(0)
     utm_srid = hp.get_utm_srid_0(lon, lat)
-
+    convert_dist = hp.get_convert_dist("m", feed.dist_units)
     s = (
         # Build point geometries in WGS84 then convert to UTM
         s.sort("shape_id", "shape_pt_sequence")
@@ -62,11 +62,7 @@ def append_dist_to_shapes(feed: "Feed") -> "Feed":
         )
         .with_columns(cum_m=pl.col("seg_m").cum_sum().over("shape_id"))
         # Convert distances to feed units
-        .with_columns(
-            shape_dist_traveled=pl.col("cum_m").map_elements(
-                lambda x: hp.get_convert_dist("m", feed.dist_units)(x)
-            ),
-        )
+        .with_columns(shape_dist_traveled=convert_dist(pl.col("cum_m")))
         # Clean up
         .drop("geometry", "prev", "seg_m", "cum_m")
     )
