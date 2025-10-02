@@ -23,7 +23,6 @@ import pathlib as pb
 import shutil
 import tempfile
 import zipfile
-from copy import deepcopy
 
 import polars as pl
 import requests
@@ -176,6 +175,7 @@ class Feed(object):
         transfers: pl.DataFrame | pl.LazyFrame | None = None,
         feed_info: pl.DataFrame | pl.LazyFrame | None = None,
         attributions: pl.DataFrame | pl.LazyFrame | None = None,
+        unzip_dir: tempfile.TemporaryDirectory | None = None,
     ):
         """
         Assume that every non-None input is a DataFrame,
@@ -191,7 +191,7 @@ class Feed(object):
         # validate some and set some derived attributes
         for prop, val in locals().items():
             if prop in cs.FEED_ATTRS:
-                if prop != "dist_units" and val is not None:
+                if prop not in {"dist_units", "unzip_dir"} and val is not None:
                     # Coerce to lazy frame
                     setattr(self, prop, val.lazy())
                 else:
@@ -257,12 +257,11 @@ class Feed(object):
         Return a copy of this feed, that is, a feed with all the same
         attributes.
         """
-        other = Feed(dist_units=self.dist_units)
-        for key in set(cs.FEED_ATTRS) - {"dist_units"}:
+        other = Feed(dist_units=self.dist_units, unzip_dir=self.unzip_dir)
+        for key in set(cs.FEED_ATTRS) - {"unzip_dir", "dist_units"}:
             value = getattr(self, key)
             if isinstance(value, pl.LazyFrame):
-                # LazyFrames are immutable expression plans; shallow copy is fine
-                value = deepcopy(value)
+                value = value.clone()
             setattr(other, key, value)
         return other
 
@@ -311,14 +310,15 @@ class Feed(object):
             shutil.make_archive(basename, format="zip", root_dir=tmp_dir.name)
             tmp_dir.cleanup()
 
-    def close_tmp(self: "Feed") -> None:
+    def close_unzip_dir(self: "Feed") -> None:
         """
-        Close this Feed's temporary directory (to free memory),
-        if it has one, that is, if it was created by reading from a ZIP file.
+        Close this Feed's temporary unzip directory, if it has one,
+        which was created by reading the feed from a ZIP file.
+        Frees memory.
         """
-        if hasattr(self, "_tmp_dir") and self._tmp_dir is not None:
-            self._tmp_dir.cleanup()
-            self._tmp_dir = None
+        if self.unzip_dir is not None:
+            self.unzip_dir.cleanup()
+            self.unzip_dir = None
 
 
 # -------------------------------------
@@ -372,18 +372,17 @@ def _read_feed_from_path(path: pb.Path, dist_units: str) -> "Feed":
     if not path.exists():
         raise ValueError(f"Path {path} does not exist")
 
+    # Read files into feed dictionary of DataFrames
+    feed_dict = {table: None for table in cs.DTYPES} | {"unzip_dir": None}
+
     # Unzip path to temporary directory if necessary
     if path.is_file():
-        zipped = True
-        tmp_dir = tempfile.TemporaryDirectory()
-        src_path = pb.Path(tmp_dir.name)
-        shutil.unpack_archive(str(path), tmp_dir.name, "zip")
+        unzip_dir = tempfile.TemporaryDirectory()
+        src_path = pb.Path(unzip_dir.name)
+        shutil.unpack_archive(str(path), unzip_dir.name, "zip")
+        feed_dict["unzip_dir"] = unzip_dir
     else:
-        zipped = False
         src_path = path
-
-    # Read files into feed dictionary of DataFrames
-    feed_dict = {table: None for table in cs.DTYPES}
 
     for p in src_path.iterdir():
         table = p.stem
@@ -406,14 +405,8 @@ def _read_feed_from_path(path: pb.Path, dist_units: str) -> "Feed":
             feed_dict[table] = f
 
     feed_dict["dist_units"] = dist_units
-    feed = Feed(**feed_dict)
 
-    # Don't remove tmp dir, so lazy tables work. Keep it alive on the Feed.
-    if zipped:
-        feed._tmp_dir = tmp_dir  # keep reference alive
-
-    return feed
-
+    return Feed(**feed_dict)
 
 def _read_feed_from_url(url: str, dist_units: str) -> "Feed":
     """

@@ -16,7 +16,7 @@ dependencies = [
     "folium>=0",
     "requests>=2",
     "pandas>=2.2.2",
-    "polars>=1.33.1",
+    "polars<1.34",  # Until Polars ST updates
     "polars-st>=0.3.0",
     "utm>=0.8.1",
 ]
@@ -32,8 +32,8 @@ build-backend = "hatchling.build"
 [tool.setuptools]
 packages = ["gtfs_kit_polars"]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=6",
     "sphinx>=3",
     "pre-commit-uv>=0",

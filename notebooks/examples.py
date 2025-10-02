@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.16.3"
+__generated_with = "0.16.5"
 app = marimo.App(width="medium")
 
 
@@ -37,8 +37,10 @@ def _(DATA, gk):
     # Read feed and describe
 
     #feed = gk.read_feed(DESK / "auckland_gtfs_20250918.zip", dist_units="km")
-    feed0 = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="m")
-    feed = feed0.append_dist_to_stop_times()
+    feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="m").append_dist_to_shapes()
+    # feed0.unzip_dir
+    # feed = feed0.append_dist_to_shapes()
+    feed.shapes.collect()
     # feed.describe()
     return (feed,)
 
@@ -69,7 +71,6 @@ def _(dates, feed, pl):
         .unique("trip_id")
     )
     t.collect()
-
     return
 
 

@@ -4,7 +4,6 @@ Constants useful across modules.
 
 import polars as pl
 
-
 #: GTFS data types (Polars dtypes)
 DTYPES = {
     "agency": {
@@ -161,6 +160,7 @@ FEED_ATTRS = [
     "trips",
     "transfers",
     "dist_units",
+    "unzip_dir",
 ]
 
 #: WGS84 coordinate reference system (used by spatial ops)
