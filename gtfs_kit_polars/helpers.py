@@ -16,6 +16,7 @@ import json2html as j2h
 import numpy as np
 import pandas as pd
 import polars as pl
+import polars_st as st
 import shapely.geometry as sg
 import utm
 
@@ -71,9 +72,9 @@ def get_utm_srid_0(lon, lat):
     return (32600 if zlet >= "N" else 32700) + int(znum)
 
 
-def get_utm_srid(g: pl.DataFrame | pl.LazyFrame) -> int:
+def get_utm_srid(g: st.GeoDataFrame | st.GeoLazyFrame) -> int:
     """
-    Get the UTM SRID for the given geotable.
+    Return the UTM SRID for the given geotable.
     """
     g = g.lazy() if isinstance(g, pl.DataFrame) else g
     lon, lat = (
@@ -90,13 +91,6 @@ def to_srid(g: pl.DataFrame | pl.LazyFrame, srid: int) -> pl.DataFrame | pl.Lazy
     Table version of the Polars ST function ``to_srid``.
     """
     return g.with_columns(geometry=pl.col("geometry").st.to_srid(srid))
-
-
-def to_wkt(g: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
-    """
-    Table version of the Polars ST function ``to_wkt``.
-    """
-    return g.with_columns(geometry=pl.col("geometry").st.to_wkt())
 
 
 def datestr_to_date(x: str | None, format_str: str = "%Y%m%d") -> dt.date | None:
