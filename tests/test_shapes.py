@@ -140,7 +140,6 @@ def test_split_simple():
     ).with_columns(
         st.geom().st.set_srid(2193).alias("geometry")
     )
-    print(bowtie)
     s = gks.split_simple(bowtie).collect()
 
     # No sub-linestring should have one coordinate
