@@ -3,6 +3,7 @@ import json
 import geopandas as gpd
 import polars as pl
 import polars_st as st
+import pytest
 import shapely.geometry as sg
 
 from gtfs_kit_polars import constants as gkc
@@ -104,9 +105,8 @@ def test_get_shapes_intersecting_geometry():
     assert gks.get_shapes_intersecting_geometry(cairns_shapeless, polygon) is None
 
 def test_split_simple():
-    m = 7
     shapes_g = gks.get_shapes(cairns, as_geo=True, use_utm=True).head(20).collect()
-    s = gks.split_simple(shapes_g, segmentize_m=m).collect()
+    s = gks.split_simple(shapes_g).collect()
     assert set(s.columns) == {
         "shape_id",
         "subshape_id",
@@ -115,27 +115,35 @@ def test_split_simple():
         "cum_length_m",
         "geometry",
     }
+    # Should have some non-simple shapes to start with
+    assert not shapes_g.with_columns(is_simple=st.geom().st.is_simple())["is_simple"].all()
+
+    # All sublinestrings of result should be simple
     assert s.with_columns(is_simple=st.geom().st.is_simple())["is_simple"].all()
+
+    # Check each shape group
     for shape_id, group in s.partition_by("shape_id", as_dict=True).items():
-        shape_id=shape_id[0]
-        n = group.height
+        shape_id = shape_id[0]
         ss = shapes_g.filter(pl.col("shape_id") == shape_id).with_columns(length=st.geom().st.length())
-        print(ss)
+        # Each subshape should be shorter than shape
         assert (group["subshape_length_m"] <= ss["length"].sum()).all()
-        L = ss["length"].sum()
-        assert (
-            L - n * m <= group["cum_length_m"].to_list()[-1] <= L
-        )
+        # Cumulative length should equal shape length within 1%
+        L = ss["length"][0]
+        assert group["cum_length_m"].max() == pytest.approx(L, rel=0.01)
 
     # Create a (non-simple) bow-tie
-    bowtie = sg.LineString([(0, 0), (1, 1), (0, 1), (1, 0)])
-    g = gpd.GeoDataFrame(
-        {"shape_id": ["test_shape"], "geometry": [bowtie]}, crs="EPSG:2193"
+    bowtie = st.GeoDataFrame(
+        {
+            "shape_id": ["test_shape"],
+            "geometry": ["LINESTRING (0 0, 1 1, 0 1, 1 0)"],
+        }
+    ).with_columns(
+        st.geom().st.set_srid(2193).alias("geometry")
     )
+    print(bowtie)
+    s = gks.split_simple(bowtie).collect()
 
-    result = gks.split_simple(g)
-
-    # Assert that no sub-linestring in the result has only one coordinate
-    for geom in result.geometry:
+    # No sub-linestring should have one coordinate
+    for geom in s["geometry"].to_list():
         assert len(geom.coords) > 1, f"Found a degenerate one-point LineString: {geom}"
 
