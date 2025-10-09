@@ -26,6 +26,7 @@ from . import constants as cs
 def make_lazy(f: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
     return f if isinstance(f, pl.LazyFrame) else f.lazy()
 
+
 def are_equal(f: pl.DataFrame | pl.LazyFrame, g: pl.DataFrame | pl.LazyFrame) -> bool:
     """
     Return True if and only if the tables are equal after sorting column names
@@ -202,6 +203,10 @@ def timestr_mod24(col: str) -> pl.Expr:
         + pl.lit(":")
         + s.cast(pl.Utf8).str.zfill(2)
     )
+
+
+def timestr_to_min(col: str) -> pl.Expr:
+    return timestr_to_seconds(col, mod24=True) // 60
 
 
 def replace_date(f: pl.LazyFrame, date: str) -> pl.LazyFrame:

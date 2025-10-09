@@ -142,13 +142,10 @@ def test_map_stops():
 
 
 def test_compute_stop_stats_0():
-    # Make two copies (like your pandas version)
     feed = cairns.copy()
-    # Prepare Polars DataFrames
     stop_times = feed.stop_times.head(250)
     trips1 = feed.trips
-
-    # feed2: direction_id all NULL
+    # Set some null directions
     trips2 = trips1.with_columns(pl.lit(None, dtype=pl.Int32).alias("direction_id"))
 
     for trips, split_directions in itertools.product(
@@ -157,10 +154,7 @@ def test_compute_stop_stats_0():
     ):
         if (
             split_directions
-            and trips.select(pl.col("direction_id").is_not_null().any())
-            .collect()
-            .item()
-            is False
+            and trips.select(pl.col("direction_id").is_null().all()).collect().item()
         ):
             # Should raise an error when all direction_id are NULL and we split by direction
             with pytest.raises(ValueError):
@@ -202,20 +196,11 @@ def test_compute_stop_stats():
     dates = cairns_dates
     feed = cairns.copy()
     n = 3
-    sids = feed.stops.loc[:n, "stop_id"]
+    sids = feed.stops.head(n).collect()["stop_id"].to_list()
     for split_directions in [True, False]:
         f = gks.compute_stop_stats(
             feed, dates + ["19990101"], stop_ids=sids, split_directions=split_directions
-        )
-
-        # Should be a data frame
-        assert isinstance(f, pd.core.frame.DataFrame)
-
-        # Should contain the correct stops
-        get = set(f["stop_id"].values)
-        g = gks.get_stops(feed, date=dates[0]).loc[lambda x: x["stop_id"].isin(sids)]
-        expect = set(g["stop_id"].values)
-        assert get == expect
+        ).collect()
 
         # Should contain the correct columns
         expect_cols = {
@@ -234,101 +219,117 @@ def test_compute_stop_stats():
 
         assert set(f.columns) == expect_cols
 
+        # Should contain the correct stops
+        g = (
+            gks.get_stops(feed, date=dates[0])
+            .filter(pl.col("stop_id").is_in(sids))
+            .collect()
+        )
+        assert set(f["stop_id"].to_list()) == set(g["stop_id"].to_list())
+
         # Should have correct dates
-        set(f["date"].tolist()) == set(cairns_dates)
+        set(f["date"].to_list()) == set(dates)
 
         # Non-feed dates should yield empty DataFrame
         f = gks.compute_stop_stats(
             feed, ["19990101"], split_directions=split_directions
         )
-        assert f.is_empty()
+        assert gkh.is_empty(f)
 
 
 def test_compute_stop_time_series_0():
-    feed1 = cairns.copy()
-    feed2 = cairns.copy()
-    feed2.trips["direction_id"] = pd.NA
-    stop_times = feed1.stop_times.iloc[:250]
-    nstops = stop_times["stop_id"].nunique()
-    for feed, split_directions in itertools.product([feed1, feed2], [True, False]):
-        if split_directions and feed.trips.direction_id.isnull().all():
+    feed = cairns.copy()
+    stop_times = feed.stop_times.head(250)
+    trips1 = feed.trips
+    # Set some null directions
+    trips2 = trips1.with_columns(pl.lit(None, dtype=pl.Int32).alias("direction_id"))
+    nstops = stop_times.collect()["stop_id"].n_unique()
+    for trips, split_directions in itertools.product([trips1, trips2], [True, False]):
+        if (
+            split_directions
+            and trips.select(pl.col("direction_id").is_null().all()).collect().item()
+        ):
             # Should raise an error
             with pytest.raises(ValueError):
                 gks.compute_stop_time_series_0(
-                    stop_times, feed.trips, split_directions=split_directions
+                    stop_times, trips, split_directions=split_directions
                 )
             continue
 
         ss = gks.compute_stop_stats_0(
-            stop_times, feed.trips, split_directions=split_directions
-        )
+            stop_times, trips, split_directions=split_directions
+        ).collect()
         sts = gks.compute_stop_time_series_0(
-            stop_times, feed.trips, freq="12h", split_directions=split_directions
-        )
+            stop_times, trips, num_minutes=12 * 60, split_directions=split_directions
+        ).collect()
 
         # Should have correct num rows and column names
         if split_directions:
             expect_cols = {"datetime", "stop_id", "direction_id", "num_trips"}
-            assert sts.shape[0] <= nstops * 2
+            assert sts.height <= nstops * 2
         else:
             expect_cols = {"datetime", "stop_id", "num_trips"}
-            assert sts.shape[0] == nstops * 2
+            assert sts.height == nstops * 2
         assert set(sts.columns) == expect_cols
 
         # Each stop should have a correct total trip count
         if not split_directions:
-            for stop_id, ssg in ss.groupby("stop_id"):
-                get = sts.loc[lambda x: x["stop_id"] == stop_id]["num_trips"].sum()
-                expect = ssg["num_trips"].sum()
-                assert get == expect
+            for stop_id, group in ss.partition_by("stop_id", as_dict=True).items():
+                stop_id = stop_id[0]
+                assert (
+                    sts.filter(pl.col("stop_id") == stop_id)["num_trips"].sum()
+                    == group["num_trips"].sum()
+                )
 
     # Empty check
-    stops_ts = gks.compute_stop_time_series_0(
-        feed.stop_times, pd.DataFrame(), freq="1h", split_directions=split_directions
+    sts = gks.compute_stop_time_series_0(
+        feed.stop_times, pl.DataFrame(), split_directions=split_directions
     )
-    assert stops_ts.is_empty()
+    assert gkh.is_empty(sts)
 
 
 def test_compute_stop_time_series():
     feed = cairns.copy()
     dates = cairns_dates
     n = 3
-    stop_ids = feed.stops.loc[:n, "stop_id"]
+    stop_ids = feed.stops.head(n).collect()["stop_id"].to_list()
 
     for split_directions in [True, False]:
         ss = gks.compute_stop_stats(
             feed, dates, stop_ids=stop_ids, split_directions=split_directions
-        )
+        ).collect()
         sts = gks.compute_stop_time_series(
             feed,
-            dates + ["20010101"],
+            dates + ["19990101"],
             stop_ids=stop_ids,
-            freq="12h",
+            num_minutes=12 * 60,
             split_directions=split_directions,
-        )
+        ).collect()
 
         # Should have correct num rows and column names
         k = len(stop_ids) * len(dates) * 2
         if split_directions:
             expect_cols = {"datetime", "stop_id", "direction_id", "num_trips"}
-            assert sts.shape[0] <= k
+            assert sts.height <= k
         else:
             expect_cols = {"datetime", "stop_id", "num_trips"}
-            assert sts.shape[0] == k
+            assert sts.height == k
         assert set(sts.columns) == expect_cols
 
         # Each stop should have a correct total trip count
         if not split_directions:
-            for stop_id, ssg in ss.groupby("stop_id"):
-                get = sts.loc[lambda x: x["stop_id"] == stop_id]["num_trips"].sum()
-                expect = ssg["num_trips"].sum()
-                assert get == expect
+            for stop_id, group in ss.partition_by("stop_id", as_dict=True).items():
+                stop_id = stop_id[0]
+                assert (
+                    sts.filter(pl.col("stop_id") == stop_id)["num_trips"].sum()
+                    == group["num_trips"].sum()
+                )
 
         # Dates should be correct
-        set(sts["datetime"].dt.strftime("%Y%m%d").values) == set(dates)
+        set(sts["datetime"].dt.strftime("%Y%m%d").to_list()) == set(dates)
 
     # Empty check
-    stops_ts = gks.compute_stop_time_series(
+    sts = gks.compute_stop_time_series(
         feed, dates=["19990101"], split_directions=split_directions
     )
-    assert stops_ts.is_empty()
+    assert gkh.is_empty(sts)

@@ -53,132 +53,8 @@ def _(feed):
 
 
 @app.cell
-def _(pl):
-    pl.LazyFrame(columns=["bingo"]).collect()
-    return
-
-
-@app.cell
-def _(feed, gk, pl):
-    def compute_stop_stats_0(
-        stop_times_subset: pl.DataFrame | pl.LazyFrame,
-        trip_subset: pl.DataFrame | pl.LazyFrame,
-        headway_start_time: str = "07:00:00",
-        headway_end_time: str = "19:00:00",
-        *,
-        split_directions: bool = False,
-    ) -> pl.LazyFrame:
-        """
-        Given a subset of a stop times Table and a subset of a trips
-        Table, return a Table that provides summary stats about the
-        stops in the inner join of the two Tables.
-
-        If ``split_directions``, then separate the stop stats by direction (0 or 1)
-        of the trips visiting the stops.
-        Use the headway start and end times to specify the time period for computing
-        headway stats.
-
-        Return a Table with the columns
-
-        - stop_id
-        - direction_id: present if and only if ``split_directions``
-        - num_routes: number of routes visiting stop
-          (in the given direction)
-        - num_trips: number of trips visiting stop
-          (in the givin direction)
-        - max_headway: maximum of the durations (in minutes)
-          between trip departures at the stop between
-          ``headway_start_time`` and ``headway_end_time``
-        - min_headway: minimum of the durations (in minutes) mentioned
-          above
-        - mean_headway: mean of the durations (in minutes) mentioned
-          above
-        - start_time: earliest departure time of a trip from this stop
-        - end_time: latest departure time of a trip from this stop
-
-        Notes
-        -----
-        - If ``trip_subset`` is empty, then return an empty Table.
-        - Raise a ValueError if ``split_directions`` and no non-null
-          direction ID values present.
-        """
-        hp = gk
-        # If trips subset empty → empty result with correct schema
-        final_cols = [
-            "stop_id",
-            "num_routes",
-            "num_trips",
-            "max_headway",
-            "min_headway",
-            "mean_headway",
-            "start_time",
-            "end_time",
-        ]
-        if split_directions:
-            final_cols.insert(1, "direction_id")
-
-        if hp.is_empty(trip_subset):
-            return pl.LazyFrame({c: [] for c in final_cols})
-
-    
-        headway_start = hp.timestr_to_seconds_0(headway_start_time)
-        headway_end = hp.timestr_to_seconds_0(headway_end_time)
-
-        # Join stop times and trips
-        f = hp.make_lazy(stop_times_subset).join(hp.make_lazy(trip_subset), "trip_id").with_columns(
-            dtime=hp.timestr_to_seconds("departure_time")
-        )
-
-        # Handle direction split
-        if split_directions:
-            # Ensure direction_id present (nullable int32)
-            if "direction_id" not in (f.collect_schema().names()):
-                f = f.with_columns(direction_id=pl.lit(None, dtype=pl.Int32))
-            f_nonnull = f.filter(pl.col("direction_id").is_not_null())
-            if f_nonnull.select(pl.len()).collect().item() == 0:
-                raise ValueError("At least one trip direction ID value must be non-NULL.")
-            group_cols = ["stop_id", "direction_id"]
-            f = f_nonnull
-        else:
-            group_cols = ["stop_id"]
-
-        # Basic stats per stop(/direction)
-        basic_stats = (
-            f.group_by(group_cols)
-            .agg(
-                num_routes=pl.col("route_id").n_unique().cast(pl.UInt32),
-                num_trips=pl.len().cast(pl.UInt32),
-                start_time_s=pl.col("dtime").min(),
-                end_time_s=pl.col("dtime").max(),
-            )
-        )
-        # Headway stats within [start, end]
-        headway_stats = (
-            f.filter((pl.col("dtime") >= headway_start) & (pl.col("dtime") <= headway_end))
-            .select(group_cols + ["dtime"])
-            .sort(by=group_cols + ["dtime"])
-            .with_columns(prev_dtime=pl.col("dtime").shift(1).over(group_cols))
-            .with_columns(headway_s=(pl.col("dtime") - pl.col("prev_dtime")))
-            .filter(pl.col("headway_s").is_not_null())
-            .group_by(group_cols)
-            .agg(
-                max_headway=(pl.col("headway_s").max() / 60.0).cast(pl.Float64),
-                min_headway=(pl.col("headway_s").min() / 60.0).cast(pl.Float64),
-                mean_headway=(pl.col("headway_s").mean() / 60.0).cast(pl.Float64),
-            )
-        )
-        # Join & finalize times as strings
-        return (
-            basic_stats.join(headway_stats, group_cols, how="left")
-            .with_columns(
-                start_time=hp.seconds_to_timestr("start_time_s"),
-                end_time=hp.seconds_to_timestr("end_time_s"),
-            )
-            .drop("start_time_s", "end_time_s")
-            .select(final_cols)
-        )
-
-    compute_stop_stats_0(feed.stop_times.head(200), feed.trips).collect()
+def _(dates, feed):
+    feed.compute_stop_time_series(dates).collect()
     return
 
 
@@ -195,7 +71,6 @@ def _(
     split_sequential,
     st,
 ):
-
     # Tweak these
     def get_self_intersections(ls: sg.LineString) -> sg.MultiPoint:
         from collections import Counter 

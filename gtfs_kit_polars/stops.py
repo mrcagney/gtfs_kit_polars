@@ -348,21 +348,21 @@ def compute_stop_stats_0(
       direction ID values present.
     """
     # Handle defunct case
-    final_cols = [
-        "stop_id",
-        "num_routes",
-        "num_trips",
-        "max_headway",
-        "min_headway",
-        "mean_headway",
-        "start_time",
-        "end_time",
-    ]
+    schema = {
+        "stop_id": pl.Utf8,
+        "num_routes": pl.UInt32,
+        "num_trips": pl.UInt32,
+        "max_headway": pl.Float64,
+        "min_headway": pl.Float64,
+        "mean_headway": pl.Float64,
+        "start_time": pl.Utf8,
+        "end_time": pl.Utf8,
+    }
     if split_directions:
-        final_cols.insert(1, "direction_id")
+        schema = {"stop_id": pl.Utf8, "direction_id": pl.Int32, **schema}
 
     if hp.is_empty(trip_subset):
-        return pl.LazyFrame({c: [] for c in final_cols})
+        return pl.LazyFrame(schema=schema)
 
     # Handle generic case
     headway_start = hp.timestr_to_seconds_0(headway_start_time)
@@ -410,7 +410,7 @@ def compute_stop_stats_0(
             mean_headway=(pl.col("headway_s").mean() / 60.0).cast(pl.Float64),
         )
     )
-    # Join & finalize times as strings
+    # Collate stats
     return (
         basic_stats.join(headway_stats, group_cols, how="left")
         .with_columns(
@@ -418,7 +418,7 @@ def compute_stop_stats_0(
             end_time=hp.seconds_to_timestr("end_time_s"),
         )
         .drop("start_time_s", "end_time_s")
-        .select(final_cols)
+        .select(list(schema.keys()))
     )
 
 
@@ -465,80 +465,78 @@ def compute_stop_stats(
     """
     dates = feed.subset_dates(dates)
     null_stats = compute_stop_stats_0(
-        pd.DataFrame(), pd.DataFrame(), split_directions=split_directions
+        pl.DataFrame(), pl.DataFrame(), split_directions=split_directions
     )
-    final_cols = ["date"] + null_stats.columns.tolist()
+    final_cols = ["date"] + list(null_stats.collect_schema().names())
 
     # Handle defunct case
     if not dates:
         return null_stats
+
+    # Restrict stop times to stop IDs if specified
+    if stop_ids is not None:
+        stop_times = feed.stop_times.filter(pl.col("stop_id").is_in(stop_ids))
+    else:
+        stop_times = feed.stop_times
 
     # Collect stats for each date,
     # memoizing stats the sequence of trip IDs active on the date
     # to avoid unnecessary recomputations.
     # Store in a dictionary of the form
     # trip ID sequence -> stats DataFarme.
-    stats_by_ids = {}
-
-    # Restrict stop times to stop IDs if specified
-    if stop_ids is not None:
-        stop_times_subset = feed.stop_times.loc[
-            lambda x: x["stop_id"].isin(stop_ids)
-        ].copy()
-    else:
-        stop_times_subset = feed.stop_times.copy()
-
     activity = feed.compute_trip_activity(dates)
-
+    stats_by_ids = {}
     frames = []
     for date in dates:
-        ids = tuple(sorted(activity.loc[activity[date] > 0, "trip_id"].values))
+        ids = tuple(
+            sorted(
+                activity.filter(pl.col(date) > 0)
+                .select("trip_id")
+                .collect()["trip_id"]
+                .to_list()
+            )
+        )
         if ids in stats_by_ids:
-            stats = (
-                stats_by_ids[ids]
-                # Assign date
-                .assign(date=date)
-            )
+            # Reuse stats
+            stats = stats_by_ids[ids].with_columns(date=pl.lit(date))
         elif ids:
-            # Compute stats
-            t = feed.trips
-            trips = t[t["trip_id"].isin(ids)].copy()
-            stats = (
-                compute_stop_stats_0(
-                    stop_times_subset,
-                    trips,
-                    split_directions=split_directions,
-                    headway_start_time=headway_start_time,
-                    headway_end_time=headway_end_time,
-                )
-                # Assign date
-                .assign(date=date)
-            )
-            # Memoize stats
+            # Compute stats afresh
+            trips = feed.trips.filter(pl.col("trip_id").is_in(ids))
+            stats = compute_stop_stats_0(
+                stop_times,
+                trips,
+                split_directions=split_directions,
+                headway_start_time=headway_start_time,
+                headway_end_time=headway_end_time,
+            ).with_columns(date=pl.lit(date))
+            # Remember stats
             stats_by_ids[ids] = stats
         else:
             stats = null_stats
 
         frames.append(stats)
 
-    # Assemble stats into a single DataFrame
-    return pd.concat(frames).filter(final_cols)
+    # Collate
+    sort_by = (
+        ["date", "stop_id", "direction_id"] if split_directions else ["date", "stop_id"]
+    )
+    return pl.concat(frames).select(final_cols).sort(sort_by)
 
 
 def compute_stop_time_series_0(
-    stop_times_subset: pd.DataFrame,
-    trips_subset: pd.DataFrame,
-    freq: str = "h",
+    stop_times_subset: pl.DataFrame | pl.LazyFrame,
+    trips_subset: pl.DataFrame | pl.LazyFrame,
+    num_minutes: int = 60,
     date_label: str = "20010101",
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
-    Compute stop stats in a 24-hour time series form at the given Pandas frequency
+    Compute stop stats in a 24-hour time series form at the given ``num_minutes`` frequency
     for stops in the inner join of the given subset of stop times and trips.
 
     If ``split_directions``, then separate each stop's stats by trip direction.
-    Use the given YYYYMMDD date label as the date in the time series index.
+    Use the given YYYYMMDD date label as the date in the time series.
 
     Return a long-format DataFrame with columns
 
@@ -550,98 +548,108 @@ def compute_stop_time_series_0(
 
     Notes
     -----
-    - The time series is computed at a one-minute frequency, then
-      resampled at the end to the given frequency
     - Stop times with null departure times are ignored, so the aggregate
       of ``num_trips`` across the day could be less than the
       ``num_trips`` column in :func:`compute_stop_stats_0`
     - All trip departure times are taken modulo 24 hours,
       so routes with trips that end past 23:59:59 will have all
       their stats wrap around to the early morning of the time series.
-    - 'num_trips' should be resampled with ``how=np.sum``
+    - 'num_trips' should be resampled by summing
     - If ``trips_subset`` is empty, then return an empty DataFrame
     - Raise a ValueError if ``split_directions`` and no non-null
       direction ID values present
 
     """
-    final_cols = [
-        "datetime",
-        "stop_id",
-        "num_trips",
-    ]
-    if split_directions:
-        final_cols.insert(2, "direction_id")
-    null_stats = pd.DataFrame([], columns=final_cols)
+    # Handle defunct cases
+    num_minutes = int(num_minutes)
+    if (num_minutes < 1) or (1440 % num_minutes != 0):
+        raise ValueError("num_minutes be a positive divisor of 24*60")
 
-    # Handle defunct case
-    if trips_subset.is_empty():
-        return null_stats
-
-    f = pd.merge(stop_times_subset, trips_subset)
-
-    if split_directions:
-        if "direction_id" not in f.columns:
-            f["direction_id"] = pd.NA
-        f = f.loc[lambda x: x.direction_id.notnull()].assign(
-            direction_id=lambda x: x.direction_id.astype(int)
-        )
-        if f.is_empty():
-            raise ValueError("At least one trip direction ID value must be non-NaN.")
-
-        # Alter stop IDs to encode trip direction:
-        # <stop ID>-0 and <stop ID>-1
-        f["stop_id"] = f["stop_id"] + "-" + f["direction_id"].map(str)
-
-    # Bin each stop departure time
-    bins = [i for i in range(24 * 60)]  # One bin for each minute
-    num_bins = len(bins)
-
-    def timestr_to_min(x):
-        return hp.timestr_to_seconds(x, mod24=True) // 60
-
-    f["departure_index"] = f["departure_time"].map(timestr_to_min)
-
-    # Create one time series for each stop
-    series_by_stop = {
-        stop: [0 for i in range(num_bins)] for stop in f["stop_id"].unique()
+    schema = {
+        "datetime": pl.Utf8,
+        "stop_id": pl.Utf8,
+        "num_trips": pl.Int32,
     }
+    if split_directions:
+        schema = {"stop_id": pl.Utf8, "direction_id": pl.Int32, **schema}
 
-    for stop, group in f.groupby("stop_id"):
-        counts = Counter((bin, 0) for bin in bins) + Counter(
-            group["departure_index"].values
+    if hp.is_empty(trips_subset) or hp.is_empty(stop_times_subset):
+        return pl.LazyFrame(schema=schema)
+
+    # Handle generic case
+    stop_times_subset = hp.make_lazy(stop_times_subset)
+    trips_subset = hp.make_lazy(trips_subset)
+
+    if split_directions:
+        if "direction_id" not in trips_subset.collect_schema().names():
+            raise ValueError(
+                "split_directions=True but trips has no direction_id column"
+            )
+        tr_nonnull = trips_subset.filter(pl.col("direction_id").is_not_null())
+        if hp.is_empty(tr_nonnull):
+            raise ValueError(
+                "split_directions=True but trips has no non-null direction_id values"
+            )
+        trips = tr_nonnull.select("trip_id", pl.col("direction_id").cast(pl.Int32))
+        group_cols = ["stop_id", "direction_id"]
+    else:
+        trips = trips_subset.select("trip_id")
+        group_cols = ["stop_id"]
+
+    # Basic stats
+    base_datetime = pl.lit(date_label + "T00:00:00").str.to_datetime(
+        format="%Y%m%dT%H:%M:%S"
+    )
+    stats = (
+        stop_times_subset.select("trip_id", "stop_id", "departure_time")
+        .join(trips, "trip_id")
+        .filter(pl.col("departure_time").is_not_null())
+        .with_columns(dtime=hp.timestr_to_seconds("departure_time", mod24=True))
+        .with_columns(datetime=base_datetime + pl.duration(seconds=pl.col("dtime")))
+        .group_by_dynamic(
+            "datetime",
+            every=f"{num_minutes}m",
+            closed="left",
+            label="left",
+            group_by=group_cols,
         )
-        series_by_stop[stop] = [counts[bin] for bin in bins]
-
-    # Build per-indicator DataFrames indexed by minute across the provided date
-    rng = pd.date_range(
-        pd.to_datetime(f"{date_label} 00:00:00"), periods=24 * 60, freq="Min"
+        # Compute stats
+        .agg(num_trips=pl.col("trip_id").count())
     )
-    series_by_indicator = {
-        "num_trips": pd.DataFrame(series_by_stop, index=rng).fillna(0)
-    }
-
-    # Combine into a single long-form time series per route (and direction if requested);
-    # hp.combine_time_series is expected to compute derived fields like service_speed
-    g = hp.combine_time_series(
-        series_by_indicator, kind="stop", split_directions=split_directions
+    # Build all times for date
+    times = (
+        pl.LazyFrame({"minute": list(range(0, 1440, num_minutes))})
+        .with_columns(datetime=base_datetime + pl.duration(minutes=pl.col("minute")))
+        .drop("minute")
     )
-    # Downsample to requested frequency (sum for counts/durations/distances; speed handled by helper)
-    return hp.downsample(g, freq=freq)
+    # Fill in missing times with zero values
+    return (
+        # Get all datetime + group_cols combinations for day
+        stats.select(group_cols)
+        .unique()
+        .join(times, how="cross")
+        # Join them to stats
+        .join(stats, ["datetime"] + group_cols, how="left")
+        # Clean up
+        .with_columns(pl.col("num_trips").fill_null(0).cast(pl.Int32))
+        .sort(["datetime"] + group_cols)
+        .select(list(schema.keys()))
+    )
 
 
 def compute_stop_time_series(
     feed: "Feed",
     dates: list[str],
     stop_ids: list[str | None] = None,
-    freq: str = "h",
+    num_minutes: int = 60,
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
     Compute time series for the given stops (defaults to all stops in Feed)
     on the given dates (YYYYMMDD date strings) at the
-    given frequency (Pandas frequency string, e.g. ``'5Min'``).
-    Return a long-format DataFrame with columns
+    given ``num_minutes`` frequency.
+    Return a long-format table with the columns
 
     - ``datetime``: datetime object for the given date and frequency chunks
     - ``stop_id``
@@ -658,58 +666,62 @@ def compute_stop_time_series(
 
     Notes
     -----
-    - The time series is computed at a one-minute frequency, then
-      resampled at the end to the given frequency
     - Stop times with null departure times are ignored, so the aggregate
       of ``num_trips`` across the day could be less than the
       ``num_trips`` column in :func:`compute_stop_stats_0`
     - All trip departure times are taken modulo 24 hours,
       so routes with trips that end past 23:59:59 will have all
       their stats wrap around to the early morning of the time series.
-    - 'num_trips' should be resampled with ``how=np.sum``
-    - If ``trips_subset`` is empty, then return an empty DataFrame
+    - 'num_trips' should be resampled by summing
     - Raise a ValueError if ``split_directions`` and no non-null
       direction ID values present
 
     """
     dates = feed.subset_dates(dates)
     null_stats = compute_stop_time_series_0(
-        pd.DataFrame(), pd.DataFrame(), split_directions=split_directions
+        pl.DataFrame(),
+        pl.DataFrame(),
+        num_minutes=num_minutes,
+        split_directions=split_directions,
     )
     # Handle defunct case
     if not dates:
         return null_stats
 
-    activity = feed.compute_trip_activity(dates)
-
     # Restrict stop times to stop IDs if specified
     if stop_ids is not None:
-        stop_times_subset = feed.stop_times.loc[
-            lambda x: x["stop_id"].isin(stop_ids)
-        ].copy()
+        stop_times_subset = feed.stop_times.filter(pl.col("stop_id").is_in(stop_ids))
     else:
-        stop_times_subset = feed.stop_times.copy()
+        stop_times_subset = feed.stop_times
 
     # Collect stats for each date, memoizing stats by trip ID sequence
     # to avoid unnecessary recomputations.
     # Store in dictionary of the form
     # trip ID sequence -> stats table
+    activity = feed.compute_trip_activity(dates)
     frames = []
     stats_by_ids = {}
     for date in dates:
-        ids = tuple(sorted(activity.loc[activity[date] > 0, "trip_id"].values))
+        ids = tuple(
+            sorted(
+                activity.filter(pl.col(date) > 0)
+                .select("trip_id")
+                .collect()["trip_id"]
+                .to_list()
+            )
+        )
         if ids in stats_by_ids:
             # Reuse stats with updated date
             stats = stats_by_ids[ids].pipe(hp.replace_date, date=date)
         elif ids:
             # Compute stats afresh
-            trips_subset = feed.trips.loc[lambda x: x["trip_id"].isin(ids)].copy()
+            trips_subset = feed.trips.filter(pl.col("trip_id").is_in(ids))
             stats = compute_stop_time_series_0(
                 stop_times_subset,
                 trips_subset,
-                split_directions=split_directions,
-                freq=freq,
+                num_minutes=num_minutes,
                 date_label=date,
+                split_directions=split_directions,
             ).pipe(hp.replace_date, date=date)
             # Remember stats
             stats_by_ids[ids] = stats
@@ -719,4 +731,4 @@ def compute_stop_time_series(
         frames.append(stats)
 
     # Collate stats
-    return pd.concat(frames, ignore_index=True)
+    return pl.concat(frames)
