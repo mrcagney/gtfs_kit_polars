@@ -32,9 +32,9 @@ Progress porting the Pandas original to Polars.
 [] helpers.py: in progress
 [] miscellany.py
 [] routes.py
-[x] shapes.py: all but ``split_simple``
+[x] shapes.py
 [] stop_times.py
-[] stops.py
+[] stops.py: in progress
 [] trips.py
 
 Notes

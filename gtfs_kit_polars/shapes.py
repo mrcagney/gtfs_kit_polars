@@ -208,8 +208,186 @@ def shapes_to_geojson(feed: "Feed", shape_ids: Iterable[str] | None = None) -> d
     return result
 
 
+def get_shapes_intersecting_geometry(
+    feed: "Feed",
+    geometry: sg.base.BaseGeometry,
+    shapes_g: st.GeoDataFrame | st.GeoLazyFrame = None,
+    *,
+    as_geo: bool = False,
+) -> st.GeoLazyFrame | None:
+    """
+    If the Feed has no shapes, then return None.
+    Otherwise, return the subset of ``feed.shapes`` that contains all shapes that
+    intersect the given Shapely WGS84 geometry, e.g. a Polygon or LineString.
+
+    If ``as_geo``, then return the shapes as a GeoDataFrame.
+    Specifying ``shapes_g`` will skip the first step of the
+    algorithm, namely, geometrizing ``feed.shapes``.
+    """
+    if feed.shapes is None:
+        return None
+
+    if shapes_g is not None:
+        g = shapes_g
+    else:
+        g = get_shapes(feed, as_geo=True)
+
+    wkb = shapely.wkb.dumps(geometry)
+    g = g.filter(
+        pl.col("geometry").st.intersects(
+            st.from_wkb(pl.lit(wkb).cast(pl.Binary)).st.set_srid(cs.WGS84)
+        )
+    )
+    if as_geo:
+        result = g
+    else:
+        result = ungeometrize_shapes(g)
+
+    return result
+
+
+# TODO: Port this properly to Polars ST
+def split_simple(
+    shapes_g: st.GeoLazyFrame | st.GeoDataFrame, segmentize_m: float = 5
+) -> st.GeoLazyFrame:
+    """
+    Given GTFS shapes as a GeoDataFrame of the form output by :func:`geometrize_shapes`
+    and possibly in a non-WGS84 CRS,
+    split each non-simple LineString into maximal simple (non-self-intersecting)
+    sub-LineStrings, and leave the simple LineStrings as is.
+    Before splitting, segmentize (with Shapely's ``segmentize`` method)
+    each non-simple LineString L by ``segmentize_m`` meters,
+    which also sets the maximum gap size between L's simple sub-LineStrings.
+
+    Return a geotabl in the CRS of ``shapes_g`` with the columns
+
+    - ``'shape_id'``: a unique identifier of the original LineString L
+    - ``'subshape_id'``: a unique identifier of a simple sub-LineString S of L
+    - ``'subshape_sequence'``: integer; indicates the order of S when joining up
+      all simple sub-LineStrings to form L
+    - ``'subshape_length_m'``: the length of S in meters
+    - ``'cum_length_m'``: the length S plus the lengths of sub-LineStrings of L
+      that come before S; in meters
+    - ``'geometry'``: LineString geometry corresponding to S
+
+    Within each 'shape_id' group, the subshapes will be sorted increasingly by
+    'subshape_sequence'.
+
+    Note that by construction, for each given LineString L with k simple subLineStrings
+    S_i, we have the inequalities
+
+    length(L) - k * segmentize_m <= sum over i of length(S_i) <= length(L),
+
+    where the lengths are expressed in meters.
+
+    Relies on GeoPandas for the time being.
+    """
+
+    def my_split(group):
+        coords = group["geometry"].iat[0].coords
+        segments = []
+        n = len(coords)
+        i = 0
+        while i < n:
+            # If only one coordinate remains, break  to
+            # avoids making a degenerate LineString
+            if i == n - 1:
+                break
+            # Start a binary search with at least two points
+            lo, hi = i + 1, n - 1
+            best = i + 1
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                candidate = sg.LineString(coords[i : mid + 1])
+                if candidate.is_simple:
+                    best = mid  # candidate is simple; try extending further.
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            segments.append(sg.LineString(coords[i : best + 1]))
+            if best == n - 1:
+                break
+            # Start next segment after the current best segment
+            i = best + 1
+        return pd.DataFrame({"geometry": segments})
+
+    srid = hp.get_srid(shapes_g)
+    shapes_g = (
+        shapes_g.collect().st.to_geopandas()
+        if isinstance(shapes_g, pl.LazyFrame)
+        else shapes_g.st.to_geopandas()
+    )
+
+    final_cols = [
+        "shape_id",
+        "subshape_id",
+        "subshape_sequence",
+        "subshape_length_m",
+        "cum_length_m",
+        "geometry",
+    ]
+
+    utm_crs = shapes_g.estimate_utm_crs()
+    g = shapes_g.assign(is_simple=lambda x: x.is_simple).to_crs(utm_crs)
+
+    # Simple shapes don't need splitting
+    g0 = (
+        g.loc[lambda x: x["is_simple"]]
+        .assign(
+            subshape_id=lambda x: x["shape_id"].astype(str) + "-0",
+            subshape_sequence=0,
+            subshape_length_m=lambda x: x.length,
+            cum_length_m=lambda x: x["subshape_length_m"],
+        )
+        .filter(final_cols)
+    )
+
+    # Split the non-simple shapes
+    g1 = (
+        g.loc[lambda x: ~x["is_simple"]]
+        .assign(geometry=lambda x: x.segmentize(segmentize_m))
+        .groupby("shape_id", sort=False)
+        .apply(my_split, include_groups=False)
+        .reset_index()
+        .rename(columns={"level_1": "subshape_sequence"})
+        .assign(
+            subshape_id=lambda x: x["shape_id"].str.cat(
+                x["subshape_sequence"].astype(str), sep="-"
+            )
+        )
+        .pipe(gpd.GeoDataFrame)
+        .set_crs(utm_crs)
+        .assign(
+            subshape_length_m=lambda x: x.length,
+            cum_length_m=lambda x: x.groupby("shape_id")["subshape_length_m"].cumsum(),
+        )
+        .filter(final_cols)
+    )
+    result = (
+        pd.concat([g0, g1], ignore_index=True)
+        .filter(
+            [
+                "subshape_id",
+                "subshape_sequence",
+                "shape_id",
+                "subshape_length_m",
+                "cum_length_m",
+                "geometry",
+            ]
+        )
+        .sort_values(["subshape_id", "subshape_sequence"], ignore_index=True)
+        .to_crs(shapes_g.crs)
+    )
+    return (
+        st.from_geopandas(result)
+        .with_columns(pl.col("geometry").st.set_srid(srid).alias("geometry"))
+        .lazy()
+        .pipe(hp.to_srid, srid)
+    )
+
+
 # TODO: Get this working correctly
-def split_simple(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyFrame:
+def split_simple_bak(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyFrame:
     """
     Given GTFS shapes as a GeoDataFrame of the form output by :func:`geometrize_shapes`
     and possibly in a non-WGS84 CRS,

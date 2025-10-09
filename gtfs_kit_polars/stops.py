@@ -148,7 +148,7 @@ def compute_stop_activity(feed: "Feed", dates: list[str]) -> pd.DataFrame:
     A stop is *active* on a given date if some trips that starts on the
     date visits the stop (possibly after midnight).
 
-    Return a DataFrame with the columns
+    Return a table with the columns
 
     - stop_id
     - ``dates[0]``: 1 if the stop has at least one trip visiting it
@@ -159,44 +159,171 @@ def compute_stop_activity(feed: "Feed", dates: list[str]) -> pd.DataFrame:
     - ``dates[-1]``: 1 if the stop has at least one trip visiting it
       on ``dates[-1]``; 0 otherwise
 
-    If all dates lie outside the Feed period, then return an empty DataFrame.
+    If all dates lie outside the Feed period, then return an empty table.
     """
     dates = feed.subset_dates(dates)
     if not dates:
-        return pd.DataFrame()
+        return pl.LazyFrame(schema={"stop_id": pl.Utf8})
 
-    trip_activity = feed.compute_trip_activity(dates)
-    g = pd.merge(trip_activity, feed.stop_times).groupby("stop_id")
-    # Pandas won't allow me to simply return g[dates].max().reset_index().
-    # I get ``TypeError: unorderable types: datetime.date() < str()``.
-    # So here's a workaround.
-    for i, date in enumerate(dates):
-        if i == 0:
-            f = g[date].max().reset_index()
-        else:
-            f = f.merge(g[date].max().reset_index())
-    return f
+    return (
+        feed.compute_trip_activity(dates)
+        .join(feed.stop_times.select("trip_id", "stop_id"), "trip_id")
+        .group_by("stop_id")
+        .agg([pl.col(d).max().alias(d) for d in dates])
+        # ensure 0/1 ints as in the pandas version
+        # .with_columns([pl.col(d).cast(pl.UInt8) for d in dates])
+        .select(["stop_id", *dates])
+    )
+
+
+def build_stop_timetable(feed: "Feed", stop_id: str, dates: list[str]) -> pl.LazyFrame:
+    """
+    Return a timetable for the given stop ID and dates (YYYYMMDD date strings)
+
+    Return a DataFrame whose columns are all those in ``feed.trips`` plus those in
+    ``feed.stop_times`` plus ``'date'``, and the stop IDs are restricted to the given
+    stop ID.
+    The result is sorted by date then departure time.
+    """
+    dates = feed.subset_dates(dates)
+    if not dates:
+        return pl.LazyFrame(schema={"stop_id": pl.Utf8})
+
+    t = feed.trips.join(feed.stop_times, "trip_id").filter(pl.col("stop_id") == stop_id)
+    a = feed.compute_trip_activity(dates)
+
+    frames = []
+    for date in dates:
+        # Slice to stops active on date
+        b = a.filter(pl.col(date) == 1)
+        f = t.join(b, "trip_id", how="semi").with_columns(date=pl.lit(date))
+        frames.append(f)
+
+    return (
+        pl.concat(frames)
+        .with_columns(dtime=hp.timestr_to_seconds("departure_time"))
+        .sort("date", "dtime")
+        .drop("dtime")
+    )
+
+
+def build_geometry_by_stop(
+    feed: "Feed", stop_ids: Iterable[str] | None = None, *, use_utm: bool = False
+) -> dict:
+    """
+    Return a dictionary of the form <stop ID> -> <Shapely Point representing stop>.
+    """
+    g = get_stops(feed, as_geo=True, use_utm=use_utm).with_columns(
+        geometry=pl.col("geometry").st.to_shapely()
+    )
+    if stop_ids is not None:
+        g = g.filter(pl.col("stop_id").is_in(stop_ids))
+    return dict(g.select("stop_id", "geometry").collect().rows())
+
+
+def stops_to_geojson(feed: "Feed", stop_ids: Iterable[str | None] = None) -> dict:
+    """
+    Return a GeoJSON FeatureCollection of Point features
+    representing all the stops in ``feed.stops``.
+    The coordinates reference system is the default one for GeoJSON,
+    namely WGS84.
+
+    If an iterable of stop IDs is given, then subset to those stops.
+    """
+    g = get_stops(feed, as_geo=True)
+    if stop_ids is not None:
+        g = g.filter(pl.col("stop_id").is_in(stop_ids))
+    if g is None or hp.is_empty(g):
+        result = {
+            "type": "FeatureCollection",
+            "features": [],
+        }
+    else:
+        result = g.collect().st.__geo_interface__
+
+    return result
+
+
+def get_stops_in_area(
+    feed: "Feed",
+    area: st.GeoLazyFrame | st.GeoDataFrame,
+) -> st.GeoLazyFrame:
+    """
+    Return the subset of ``feed.stops`` that contains all stops that intersect the
+    given geotable of polygons.
+    """
+    area = hp.make_lazy(area)
+    return feed.stops.join(
+        get_stops(feed, as_geo=True).st.sjoin(hp.to_srid(area, cs.WGS84)),
+        "stop_id",
+        how="semi",
+    )
+
+
+def map_stops(feed: "Feed", stop_ids: Iterable[str], stop_style: dict = STOP_STYLE):
+    """
+    Return a Folium map showing the given stops of this Feed.
+    If some of the given stop IDs are not found in the feed, then raise a ValueError.
+    """
+    # Initialize map
+    my_map = fl.Map(tiles="cartodbpositron")
+
+    # Add stops to feature group
+    stops = feed.stops.filter(pl.col("stop_id").is_in(stop_ids)).fill_null("n/a")
+
+    # Add stops with clustering
+    callback = f"""\
+    function (row) {{
+        var imarker;
+        marker = L.circleMarker(new L.LatLng(row[0], row[1]),
+            {stop_style}
+        );
+        marker.bindPopup(
+            '<b>Stop name</b>: ' + row[2] + '<br>' +
+            '<b>Stop code</b>: ' + row[3] + '<br>' +
+            '<b>Stop ID</b>: ' + row[4]
+        );
+        return marker;
+    }};
+    """
+    fp.FastMarkerCluster(
+        data=stops.select(["stop_lat", "stop_lon", "stop_name", "stop_code", "stop_id"])
+        .collect()
+        .to_numpy()
+        .tolist(),
+        callback=callback,
+        disableClusteringAtZoom=14,
+    ).add_to(my_map)
+
+    # Fit map to stop bounds
+    bounds = [
+        (stops.select("stop_lat").min(), stops.select("stop_lon").min()),
+        (stops.select("stop_lat").max(), stops.select("stop_lon").max()),
+    ]
+    my_map.fit_bounds(bounds, padding=[1, 1])
+
+    return my_map
 
 
 def compute_stop_stats_0(
-    stop_times_subset: pd.DataFrame,
-    trips_subset: pd.DataFrame,
+    stop_times_subset: pl.DataFrame | pl.LazyFrame,
+    trip_subset: pl.DataFrame | pl.LazyFrame,
     headway_start_time: str = "07:00:00",
     headway_end_time: str = "19:00:00",
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
-    Given a subset of a trips DataFrame and a subset of a stop times
-    DataFrame, return a DataFrame that provides summary stats about the
-    stops in the inner join of the two DataFrames.
+    Given a subset of a stop times Table and a subset of a trips
+    Table, return a Table that provides summary stats about the
+    stops in the inner join of the two Tables.
 
     If ``split_directions``, then separate the stop stats by direction (0 or 1)
     of the trips visiting the stops.
     Use the headway start and end times to specify the time period for computing
     headway stats.
 
-    Return a DataFrame with the columns
+    Return a Table with the columns
 
     - stop_id
     - direction_id: present if and only if ``split_directions``
@@ -216,85 +343,83 @@ def compute_stop_stats_0(
 
     Notes
     -----
-    - If ``trips_subset`` is empty, then return an empty DataFrame.
-    - Raise a ValueError if ``split_directions`` and no non-NaN
+    - If ``trip_subset`` is empty, then return an empty Table.
+    - Raise a ValueError if ``split_directions`` and no non-null
       direction ID values present.
-
     """
+    # Handle defunct case
     final_cols = [
         "stop_id",
-        "num_trips",
         "num_routes",
-        "max_headway",  # minutes
-        "min_headway",  # minutes
-        "mean_headway",  # minutes
-        "start_time",  # HH:MM:SS
-        "end_time",  # HH:MM:SS
+        "num_trips",
+        "max_headway",
+        "min_headway",
+        "mean_headway",
+        "start_time",
+        "end_time",
     ]
     if split_directions:
-        final_cols.append("direction_id")
+        final_cols.insert(1, "direction_id")
 
-    null_stats = pd.DataFrame(data=[], columns=final_cols)
+    if hp.is_empty(trip_subset):
+        return pl.LazyFrame({c: [] for c in final_cols})
 
-    # Handle defunct case
-    if trips_subset.is_empty():
-        return null_stats
+    # Handle generic case
+    headway_start = hp.timestr_to_seconds_0(headway_start_time)
+    headway_end = hp.timestr_to_seconds_0(headway_end_time)
 
-    f = stop_times_subset.merge(trips_subset)
-
-    # Convert departure times to seconds to ease headway calculations
-    f["departure_time"] = f["departure_time"].map(hp.timestr_to_seconds)
-
-    headway_start = hp.timestr_to_seconds(headway_start_time)
-    headway_end = hp.timestr_to_seconds(headway_end_time)
-
-    # Compute stats for each stop
-    def agg(group):
-        # Operate on the group of all stop times for an individual stop
-        d = dict()
-        d["num_routes"] = group["route_id"].unique().size
-        d["num_trips"] = group.shape[0]
-        d["start_time"] = group["departure_time"].min()
-        d["end_time"] = group["departure_time"].max()
-        headways = []
-        dtimes = sorted(
-            [
-                dtime
-                for dtime in group["departure_time"].values
-                if headway_start <= dtime <= headway_end
-            ]
-        )
-        headways.extend([dtimes[i + 1] - dtimes[i] for i in range(len(dtimes) - 1)])
-        if headways:
-            d["max_headway"] = np.max(headways) / 60  # minutes
-            d["min_headway"] = np.min(headways) / 60  # minutes
-            d["mean_headway"] = np.mean(headways) / 60  # minutes
-        else:
-            d["max_headway"] = np.nan
-            d["min_headway"] = np.nan
-            d["mean_headway"] = np.nan
-        return pd.Series(d)
-
-    if split_directions:
-        if "direction_id" not in f.columns:
-            f["direction_id"] = np.nan
-        f = f.loc[lambda x: x.direction_id.notnull()].assign(
-            direction_id=lambda x: x.direction_id.astype(int)
-        )
-        if f.is_empty():
-            raise ValueError("At least one trip direction ID value must be non-NaN.")
-        g = f.groupby(["stop_id", "direction_id"])
-    else:
-        g = f.groupby("stop_id")
-
-    result = g.apply(agg, include_groups=False).reset_index()
-
-    # Convert start and end times to time strings
-    result[["start_time", "end_time"]] = result[["start_time", "end_time"]].map(
-        lambda x: hp.seconds_to_timestr(x)
+    # Join stop times and trips
+    f = (
+        hp.make_lazy(stop_times_subset)
+        .join(hp.make_lazy(trip_subset), "trip_id")
+        .with_columns(dtime=hp.timestr_to_seconds("departure_time"))
     )
 
-    return result.filter(final_cols)
+    # Handle direction split
+    if split_directions:
+        # Ensure direction_id present (nullable int32)
+        if "direction_id" not in (f.collect_schema().names()):
+            f = f.with_columns(direction_id=pl.lit(None, dtype=pl.Int32))
+        f_nonnull = f.filter(pl.col("direction_id").is_not_null())
+        if f_nonnull.select(pl.len()).collect().item() == 0:
+            raise ValueError("At least one trip direction ID value must be non-NULL.")
+        group_cols = ["stop_id", "direction_id"]
+        f = f_nonnull
+    else:
+        group_cols = ["stop_id"]
+
+    # Basic stats per stop(/direction)
+    basic_stats = f.group_by(group_cols).agg(
+        num_routes=pl.col("route_id").n_unique().cast(pl.UInt32),
+        num_trips=pl.len().cast(pl.UInt32),
+        start_time_s=pl.col("dtime").min(),
+        end_time_s=pl.col("dtime").max(),
+    )
+    # Headway stats within [start, end]
+    headway_stats = (
+        f.filter((pl.col("dtime") >= headway_start) & (pl.col("dtime") <= headway_end))
+        .select(group_cols + ["dtime"])
+        .sort(by=group_cols + ["dtime"])
+        .with_columns(prev_dtime=pl.col("dtime").shift(1).over(group_cols))
+        .with_columns(headway_s=(pl.col("dtime") - pl.col("prev_dtime")))
+        .filter(pl.col("headway_s").is_not_null())
+        .group_by(group_cols)
+        .agg(
+            max_headway=(pl.col("headway_s").max() / 60.0).cast(pl.Float64),
+            min_headway=(pl.col("headway_s").min() / 60.0).cast(pl.Float64),
+            mean_headway=(pl.col("headway_s").mean() / 60.0).cast(pl.Float64),
+        )
+    )
+    # Join & finalize times as strings
+    return (
+        basic_stats.join(headway_stats, group_cols, how="left")
+        .with_columns(
+            start_time=hp.seconds_to_timestr("start_time_s"),
+            end_time=hp.seconds_to_timestr("end_time_s"),
+        )
+        .drop("start_time_s", "end_time_s")
+        .select(final_cols)
+    )
 
 
 def compute_stop_stats(
@@ -595,132 +720,3 @@ def compute_stop_time_series(
 
     # Collate stats
     return pd.concat(frames, ignore_index=True)
-
-
-def build_stop_timetable(feed: "Feed", stop_id: str, dates: list[str]) -> pd.DataFrame:
-    """
-    Return a DataFrame containing the timetable for the given stop ID
-    and dates (YYYYMMDD date strings)
-
-    Return a DataFrame whose columns are all those in ``feed.trips`` plus those in
-    ``feed.stop_times`` plus ``'date'``, and the stop IDs are restricted to the given
-    stop ID.
-    The result is sorted by date then departure time.
-    """
-    dates = feed.subset_dates(dates)
-    if not dates:
-        return pd.DataFrame()
-
-    t = pd.merge(feed.trips, feed.stop_times)
-    t = t[t["stop_id"] == stop_id].copy()
-    a = feed.compute_trip_activity(dates)
-
-    frames = []
-    for date in dates:
-        # Slice to stops active on date
-        ids = a.loc[a[date] == 1, "trip_id"]
-        f = t[t["trip_id"].isin(ids)].copy()
-        f["date"] = date
-        frames.append(f)
-
-    return (
-        pd.concat(frames)
-        .assign(dtime=lambda x: x["departure_time"].map(hp.timestr_to_seconds))
-        .sort_values(["date", "dtime"], ignore_index=True)
-        .drop("dtime", axis=1)
-    )
-
-
-def build_geometry_by_stop(
-    feed: "Feed", stop_ids: Iterable[str] | None = None, *, use_utm: bool = False
-) -> dict:
-    """
-    Return a dictionary of the form <stop ID> -> <Shapely Point representing stop>.
-    """
-    g = get_stops(feed, as_geo=True, use_utm=use_utm).with_columns(
-        geometry=pl.col("geometry").st.to_shapely()
-    )
-    if stop_ids is not None:
-        g = g.filter(pl.col("stop_id").is_in(stop_ids))
-    return dict(g.select("stop_id", "geometry").collect().rows())
-
-
-def stops_to_geojson(feed: "Feed", stop_ids: Iterable[str | None] = None) -> dict:
-    """
-    Return a GeoJSON FeatureCollection of Point features
-    representing all the stops in ``feed.stops``.
-    The coordinates reference system is the default one for GeoJSON,
-    namely WGS84.
-
-    If an iterable of stop IDs is given, then subset to those stops.
-    If some of the given stop IDs are not found in the feed, then raise a ValueError.
-    """
-    if stop_ids is None or not list(stop_ids):
-        stop_ids = feed.stops.stop_id
-
-    D = set(stop_ids) - set(feed.stops.stop_id)
-    if D:
-        raise ValueError(f"Stops {D} are not found in feed.")
-
-    g = get_stops(feed, as_geo=True).loc[lambda x: x["stop_id"].isin(stop_ids)]
-
-    return hp.drop_feature_ids(json.loads(g.to_json()))
-
-
-def get_stops_in_area(
-    feed: "Feed",
-    area: gpd.GeoDataFrame,
-) -> pd.DataFrame:
-    """
-    Return the subset of ``feed.stops`` that contains all stops that lie
-    within the given GeoDataFrame of polygons.
-    """
-    return (
-        gpd.sjoin(get_stops(feed, as_geo=True), area.to_crs(cs.WGS84))
-        .filter(["stop_id"])
-        .merge(feed.stops)
-    )
-
-
-def map_stops(feed: "Feed", stop_ids: Iterable[str], stop_style: dict = STOP_STYLE):
-    """
-    Return a Folium map showing the given stops of this Feed.
-    If some of the given stop IDs are not found in the feed, then raise a ValueError.
-    """
-    # Initialize map
-    my_map = fl.Map(tiles="cartodbpositron")
-
-    # Add stops to feature group
-    stops = feed.stops.loc[lambda x: x.stop_id.isin(stop_ids)].fillna("n/a")
-
-    # Add stops with clustering
-    callback = f"""\
-    function (row) {{
-        var imarker;
-        marker = L.circleMarker(new L.LatLng(row[0], row[1]),
-            {stop_style}
-        );
-        marker.bindPopup(
-            '<b>Stop name</b>: ' + row[2] + '<br>' +
-            '<b>Stop code</b>: ' + row[3] + '<br>' +
-            '<b>Stop ID</b>: ' + row[4]
-        );
-        return marker;
-    }};
-    """
-    fp.FastMarkerCluster(
-        data=stops[
-            ["stop_lat", "stop_lon", "stop_name", "stop_code", "stop_id"]
-        ].values.tolist(),
-        callback=callback,
-        disableClusteringAtZoom=14,
-    ).add_to(my_map)
-
-    # Fit map to stop bounds
-    bounds = [
-        (stops.stop_lat.min(), stops.stop_lon.min()),
-        (stops.stop_lat.max(), stops.stop_lon.max()),
-    ]
-    my_map.fit_bounds(bounds, padding=[1, 1])
-
-    return my_map

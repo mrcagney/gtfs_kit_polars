@@ -144,7 +144,7 @@ def compute_trip_activity(feed: "Feed", dates: list[str]) -> pd.LazyFrame:
       0 otherwise
 
     If ``dates`` is ``None`` or the empty list, then return an
-    empty DataFrame.
+    empty table.
     """
     dates = feed.subset_dates(dates)
     if not dates:

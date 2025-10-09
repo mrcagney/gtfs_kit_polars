@@ -57,7 +57,9 @@ def test_ungeometrize_shapes():
     shapes2 = gks.ungeometrize_shapes(geo_shapes).collect()
 
     # Test columns are correct
-    assert set(shapes2.columns) == set(list(shapes.columns)) - set(["shape_dist_traveled"])
+    assert set(shapes2.columns) == set(list(shapes.columns)) - set(
+        ["shape_dist_traveled"]
+    )
 
     # Data frames should agree on certain columns
     cols = ["shape_id", "shape_pt_lon", "shape_pt_lat"]
@@ -69,7 +71,6 @@ def test_get_shapes():
     assert gkh.get_srid(g) == gkc.WGS84
     assert set(g.columns) == {"shape_id", "geometry"}
     assert gks.get_shapes(cairns_shapeless, as_geo=True) is None
-
 
 
 def test_build_geometry_by_shape():
@@ -104,6 +105,7 @@ def test_get_shapes_intersecting_geometry():
     assert set(g["shape_id"].unique()) == set(shape_ids)
     assert gks.get_shapes_intersecting_geometry(cairns_shapeless, polygon) is None
 
+
 def test_split_simple():
     shapes_g = gks.get_shapes(cairns, as_geo=True, use_utm=True).head(20).collect()
     s = gks.split_simple(shapes_g).collect()
@@ -116,7 +118,9 @@ def test_split_simple():
         "geometry",
     }
     # Should have some non-simple shapes to start with
-    assert not shapes_g.with_columns(is_simple=st.geom().st.is_simple())["is_simple"].all()
+    assert not shapes_g.with_columns(is_simple=st.geom().st.is_simple())[
+        "is_simple"
+    ].all()
 
     # All sublinestrings of result should be simple
     assert s.with_columns(is_simple=st.geom().st.is_simple())["is_simple"].all()
@@ -124,7 +128,9 @@ def test_split_simple():
     # Check each shape group
     for shape_id, group in s.partition_by("shape_id", as_dict=True).items():
         shape_id = shape_id[0]
-        ss = shapes_g.filter(pl.col("shape_id") == shape_id).with_columns(length=st.geom().st.length())
+        ss = shapes_g.filter(pl.col("shape_id") == shape_id).with_columns(
+            length=st.geom().st.length()
+        )
         # Each subshape should be shorter than shape
         assert (group["subshape_length_m"] <= ss["length"].sum()).all()
         # Cumulative length should equal shape length within 1%
@@ -137,12 +143,9 @@ def test_split_simple():
             "shape_id": ["test_shape"],
             "geometry": ["LINESTRING (0 0, 1 1, 0 1, 1 0)"],
         }
-    ).with_columns(
-        st.geom().st.set_srid(2193).alias("geometry")
-    )
+    ).with_columns(st.geom().st.set_srid(2193).alias("geometry"))
     s = gks.split_simple(bowtie).collect()
 
     # No sub-linestring should have one coordinate
-    for geom in s["geometry"].to_list():
+    for geom in s["geometry"].st.to_shapely().to_list():
         assert len(geom.coords) > 1, f"Found a degenerate one-point LineString: {geom}"
-
