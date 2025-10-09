@@ -34,7 +34,7 @@ Progress porting the Pandas original to Polars.
 [] routes.py
 [x] shapes.py
 [] stop_times.py
-[] stops.py: in progress
+[x] stops.py
 [] trips.py
 
 Notes
