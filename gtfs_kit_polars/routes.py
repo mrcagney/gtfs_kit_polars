@@ -9,11 +9,11 @@ import json
 from typing import TYPE_CHECKING, Iterable
 
 import folium as fl
-import polars as pl
-import polars_st as st
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import polars as pl
+import polars_st as st
 import shapely.geometry as sg
 import shapely.ops as so
 
@@ -120,16 +120,11 @@ def get_routes(
             groupby_cols = ["route_id"]
             final_cols = f.columns.tolist() + ["geometry"]
 
-        # def merge_lines(group):
-        #     d = {}
-        #     d["geometry"] = so.linemerge(group["geometry"].tolist())
-        #     return pd.Series(d)
-
         def merge_lines(group):
             lines = [
                 g
                 for g in group["geometry"]
-                if g.geom_type in ["LineString", "MultiLineString"]
+                if g and g.geom_type in ["LineString", "MultiLineString"]
             ]
             if not lines:
                 return pd.Series({"geometry": None})

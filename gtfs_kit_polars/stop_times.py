@@ -3,12 +3,13 @@ Functions about stop times.
 """
 
 from __future__ import annotations
-from typing import Iterable, TYPE_CHECKING
-import json
 
-import polars as pl
-import pandas as pd
+import json
+from typing import TYPE_CHECKING, Iterable
+
 import numpy as np
+import pandas as pd
+import polars as pl
 
 from . import helpers as hp
 
@@ -31,7 +32,59 @@ def get_stop_times(feed: "Feed", date: str | None = None) -> pl.LazyFrame:
     return st
 
 
-# TODO: Rewrite because way too slow
+
+def get_start_and_end_times(feed: "Feed", date: str | None = None) -> tuple[str]:
+    """
+    Return the first departure time and last arrival time
+    (HH:MM:SS time strings) listed in ``feed.stop_times``, respectively.
+    Restrict to the given date (YYYYMMDD string) if specified.
+    """
+    st = feed.get_stop_times(date)
+    return (
+        st.select("departure_time").drop_nulls().min().collect().row(0)[0],
+        st.select("arrival_time").drop_nulls().max().collect().row(0)[0]
+    )
+
+
+def stop_times_to_geojson(
+    feed: "Feed",
+    trip_ids: Iterable[str | None] = None,
+) -> dict:
+    """
+    Return a GeoJSON FeatureCollection of Point features
+    representing all the trip-stop pairs in ``feed.stop_times``.
+    The coordinates reference system is the default one for GeoJSON,
+    namely WGS84.
+
+    For every trip, drop duplicate stop IDs within that trip.
+    In particular, a looping trip will lack its final stop.
+
+    If an iterable of trip IDs is given, then subset to those trips, silently dropping
+    invalid trip IDs.
+    """
+    from .stops import get_stops
+
+    if trip_ids is None or not list(trip_ids):
+        trip_ids = feed.trips.trip_id
+
+    st = feed.stop_times.filter(pl.col("trip_id").is_in(trip_ids))
+    g = (
+        get_stops(feed, as_geo=True)
+        .join(st, "stop_id")
+        .unique(subset=["trip_id", "stop_id"])
+        .sort("trip_id", "stop_sequence")
+    )
+    if g is None or hp.is_empty(g):
+        result = {
+            "type": "FeatureCollection",
+            "features": [],
+        }
+    else:
+        result = g.collect().st.__geo_interface__
+
+    return result
+
+# TODO: test this
 def append_dist_to_stop_times(feed: "Feed") -> "Feed":
     """
     Calculate and append the optional ``shape_dist_traveled`` column in
@@ -54,185 +107,108 @@ def append_dist_to_stop_times(feed: "Feed") -> "Feed":
     distances and use them and their corresponding departure times to linearly
     interpolate the rest of the distances.
     """
-    if feed.shapes is None or hp.is_empty(feed.shapes):
+    if getattr(feed, "shapes", None) is None or hp.is_empty(feed.shapes):
         return feed
 
-    # Geometry dicts in meters
-    geom_by_stop = feed.build_geometry_by_stop(use_utm=True)
-    geom_by_shape = feed.build_geometry_by_shape(use_utm=True)
-
-    # Memoize per (shape_id, stop_id)
-    dist_by_stop_by_shape = {k: {} for k in geom_by_shape}
-
-    # def compute_dist(group):
-    #     g = group.copy()
-
-    #     # Compute the distances of the stops along this trip and memoize.
-    #     shape = g.shape_id.iat[0]
-    #     linestring = geom_by_shape[shape]
-    #     dists = []
-    #     for stop in g.stop_id.values:
-    #         if stop in dist_by_stop_by_shape[shape]:
-    #             d = dist_by_stop_by_shape[shape][stop]
-    #         else:
-    #             d = linestring.project(geom_by_stop[stop])
-    #             dist_by_stop_by_shape[shape][stop] = d
-    #         dists.append(d)
-
-    #     s = sorted(dists)
-    #     D = linestring.length
-    #     dists_are_reasonable = all([d < D + 100 for d in dists])
-
-    #     if dists_are_reasonable and s == dists:
-    #         # Good
-    #         g["shape_dist_traveled"] = dists
-    #     elif dists_are_reasonable and s == dists[::-1]:
-    #         # Good after reversal.
-    #         # This happens when the direction of the linestring
-    #         # opposes the direction of the vehicle trip.
-    #         dists = dists[::-1]
-    #         g["shape_dist_traveled"] = dists
-    #     else:
-    #         # Bad. Redo using interpolation on a good subset of dists.
-    #         dists = np.array([0] + dists[1:-1] + [D])
-    #         ix = hp.longest_subsequence(dists, index=True)
-    #         good_dists = np.take(dists, ix)
-    #         g["shape_dist_traveled"] = np.interp(
-    #             g["dtime"], g.iloc[ix]["dtime"], good_dists
-    #         )
-
-    #         # Update dist dictionary with new and improved dists
-    #         for row in g[["stop_id", "shape_dist_traveled"]].itertuples(index=False):
-    #             dist_by_stop_by_shape[shape][row.stop_id] = row.shape_dist_traveled
-
-    #     return g
-
-    def compute_dist(group: pl.DataFrame) -> pl.DataFrame:
-        g = group.clone()
-        shape = g["shape_id"][0]
-        if shape is None or (isinstance(shape, float) and np.isnan(shape)):
-            # No shape -> all NaN
-            g = g.with_columns(pl.lit(None, pl.Float64).alias("shape_dist_traveled"))
-        else:
-            linestring = geom_by_shape[shape]
-            dists = []
-            cache = dist_by_stop_by_shape[shape]
-            for stop in g["stop_id"]:
-                if stop in cache:
-                    d = cache[stop]
-                else:
-                    d = linestring.project(geom_by_stop[stop])
-                    cache[stop] = d
-                dists.append(d)
-
-            s = sorted(dists)
-            D = linestring.length
-            dists_are_reasonable = all(d < D + 100 for d in dists)
-
-            if dists_are_reasonable and s == dists:
-                pass  # already good
-            elif dists_are_reasonable and s == dists[::-1]:
-                dists = dists[::-1]  # reversed trip direction vs. shape direction
-            else:
-                # Bad. Redo using interpolation on a good subset of dists.
-                arr = np.array([0] + dists[1:-1] + [D], dtype=float)
-                ix = hp.longest_subsequence(arr, index=True)
-                good_dists = np.take(arr, ix)
-                times = g["dtime"].to_numpy()
-                good_times = times[ix]
-                dists = np.interp(times, good_times, good_dists).tolist()
-
-                # Update cache with improved values
-                for stop, d in zip(g["stop_id"], dists):
-                    cache[stop] = d
-
-            g = g.with_columns(pl.Series("shape_dist_traveled", dists))
-
-        return g
-
-    # Apply per-trip computation in eager, then convert units and return to lazy
-    # Columns from original stop_times to keep and final set with the new distance column
-    cols = [
-        c
-        for c in feed.stop_times.collect_schema().names()
-        if c != "shape_dist_traveled"
+    # Prepare data, building geometry tables in UTM (meters)
+    shapes_geo = feed.get_shapes(as_geo=True, use_utm=True).select(
+        "shape_id", "geometry"
+    )
+    stops_geo = feed.get_stops(as_geo=True, use_utm=True).select("stop_id", "geometry")
+    convert = hp.get_convert_dist("m", feed.dist_units)  # returns a Polars expr fn
+    final_cols = [c for c in feed.stop_times.schema if c != "shape_dist_traveled"] + [
+        "shape_dist_traveled"
     ]
-    final_cols = cols + ["shape_dist_traveled"]
-    convert_dist = hp.get_convert_dist("m", feed.dist_units)
-    st = (
-        feed.stop_times.select(cols)
-        .join(feed.trips.select("trip_id", "shape_id"), on="trip_id", how="left")
-        .with_columns(dtime=hp.timestr_to_seconds("departure_time"))
-        .sort("trip_id", "stop_sequence")
-        .collect()
-        # Cheating here
-        # .to_pandas()
-        # .groupby("trip_id")
-        # .apply(compute_dist, include_groups=False)
-        # .reset_index()
-        # .pipe(pl.from_pandas)
-        .group_by("trip_id")
-        .map_groups(compute_dist)
-        # Convert from meters to feed units
-        .with_columns(
-            pl.when(pl.col("shape_dist_traveled").is_not_null())
-            .then(convert_dist(pl.col("shape_dist_traveled")))
-            .otherwise(None)
-            .alias("shape_dist_traveled")
+
+    stop_times = (
+        feed.stop_times.join(
+            feed.trips.select("trip_id", "shape_id"), on="trip_id", how="left"
         )
+        .join(shapes_geo.rename({"geometry": "shape_geom"}), on="shape_id", how="left")
+        .join(stops_geo.rename({"geometry": "stop_geom"}), on="stop_id", how="left")
+        .sort("trip_id", "stop_sequence")
+        .with_columns(
+            # seconds since midnight (mod 24) for interpolation fallback
+            dtime=hp.timestr_to_seconds("departure_time", mod24=True),
+            # distances along the linestring (in meters), and line length
+            dist=pl.when(
+                pl.col("shape_geom").is_not_null() & pl.col("stop_geom").is_not_null()
+            )
+            .then(pl.col("shape_geom").st.project(pl.col("stop_geom")))
+            .otherwise(None)
+            .cast(pl.Float64),
+            shape_length=pl.col("shape_geom").st.length().cast(pl.Float64),
+        )
+        # Fix reversed direction trips
+        .with_columns(
+            first_dist=pl.col("dist").first().over("trip_id"),
+            last_dist=pl.col("dist").last().over("trip_id"),
+        )
+        .with_columns(
+            need_flip=(pl.col("last_dist") < pl.col("first_dist"))
+            & pl.col("shape_length").is_not_null(),
+        )
+        .with_columns(
+            dist=pl.when(pl.col("need_flip"))
+            .then(pl.col("shape_length") - pl.col("dist"))
+            .otherwise(pl.col("dist"))
+        )
+        .drop("shape_geom", "stop_geom", "first_dist", "last_dist", "need_flip")
+    )
+
+    # Separate trips that have bad distances and fix them
+    bad_trips = (
+        stop_times.with_columns(
+            step=(pl.col("dist") - pl.col("dist").shift(1)).over("trip_id"),
+            overrun=(pl.col("dist") > (pl.col("shape_length") + pl.lit(100.0))),
+        )
+        .with_columns(
+            has_bad_step=(pl.col("step") < 0) & pl.col("dist").is_not_null(),
+            has_overrun=pl.col("overrun").any().over("trip_id"),
+        )
+        .filter(pl.col("has_bad_step") | pl.col("has_overrun"))
+        .select("trip_id")
+        .unique()
+    )
+
+    def compute_dist(g: pl.DataFrame) -> pl.DataFrame:
+        D = g["shape_length"][0]
+        dists0 = g["dist"].to_list()
+
+        # No geometry length or single stop → trivial
+        if np.isnan(D) or len(dists0) <= 1:
+            return g
+
+        times = g["dtime"].to_numpy()
+        dists = np.array([0.0] + dists0[1:-1] + [float(D)], dtype=float)
+        ix = hp.longest_subsequence(dists, index=True)
+        good_dists = np.take(dists, ix)
+        good_times = np.take(times, ix)
+        new_dists = np.interp(times, good_times, good_dists).astype(float)
+
+        return g.with_columns(dist=pl.Series(new_dists))
+
+    fixed = (
+        stop_times.join(bad_trips, on="trip_id", how="inner")
+        .sort("trip_id", "stop_sequence")
+        .group_by("trip_id")
+        .map_groups(compute_dist, schema=stop_times.schema)
+    )
+
+    good = stop_times.join(bad_trips, on="trip_id", how="anti")
+
+    # Assemble stop times
+    stop_times = (
+        pl.concat([good, fixed])
+        .with_columns(
+            shape_dist_traveled=pl.when(pl.col("dist").is_not_null())
+            .then(convert(pl.col("dist")))
+            .otherwise(None)
+        )
+        .sort("trip_id", "stop_sequence")
         .select(final_cols)
-        .lazy()
     )
-    # Create new feed
+
     new_feed = feed.copy()
-    new_feed.stop_times = st
-
+    new_feed.stop_times = stop_times
     return new_feed
-
-
-def get_start_and_end_times(feed: "Feed", date: str | None = None) -> list[str]:
-    """
-    Return the first departure time and last arrival time
-    (HH:MM:SS time strings) listed in ``feed.stop_times``, respectively.
-    Restrict to the given date (YYYYMMDD string) if specified.
-    """
-    st = feed.get_stop_times(date)
-    return (st["departure_time"].dropna().min(), st["arrival_time"].dropna().max())
-
-
-def stop_times_to_geojson(
-    feed: "Feed",
-    trip_ids: Iterable[str | None] = None,
-) -> dict:
-    """
-    Return a GeoJSON FeatureCollection of Point features
-    representing all the trip-stop pairs in ``feed.stop_times``.
-    The coordinates reference system is the default one for GeoJSON,
-    namely WGS84.
-
-    For every trip, drop duplicate stop IDs within that trip.
-    In particular, a looping trip will lack its final stop.
-
-    If an iterable of trip IDs is given, then subset to those trips.
-    If some of the given trip IDs are not found in the feed, then raise a ValueError.
-    """
-    from .stops import get_stops
-
-    if trip_ids is None or not list(trip_ids):
-        trip_ids = feed.trips.trip_id
-
-    D = set(trip_ids) - set(feed.trips.trip_id)
-    if D:
-        raise ValueError(f"Trip IDs {D} not found in feed.")
-
-    st = feed.stop_times.loc[lambda x: x.trip_id.isin(trip_ids)]
-
-    g = (
-        get_stops(feed, as_geo=True)
-        .loc[lambda x: x["stop_id"].isin(st["stop_id"].unique())]
-        .merge(st)
-        .sort_values(["trip_id", "stop_sequence"])
-        .drop_duplicates(subset=["trip_id", "stop_id"])
-    )
-
-    return hp.drop_feature_ids(json.loads(g.to_json()))

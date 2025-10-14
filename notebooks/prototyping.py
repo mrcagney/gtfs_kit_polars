@@ -16,7 +16,7 @@ def _():
     import warnings
 
     import marimo as mo
-    import polars as pl 
+    import polars as pl
     import polars_st as st
     import pandas as pd
     import numpy as np
@@ -39,7 +39,7 @@ def _():
 def _(DATA, gk):
     # akl_url = "https://gtfs.at.govt.nz/gtfs.zip"
     # feed = gk.read_feed(akl_url, dist_units="km")
-    #feed = gk.read_feed(pl.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km")
+    # feed = gk.read_feed(pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km")
     feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
     return (feed,)
 
@@ -53,9 +53,15 @@ def _(feed):
 
 
 @app.cell
+def _(append_dist_to_stop_times, feed):
+
+
+    append_dist_to_stop_times(feed).stop_times.collect()
+    return
+
+
+@app.cell
 def _(List, Tuple, sg):
-
-
     def split_simple_0(line: sg.LineString) -> list[sg.LineString]:
         """
         Greedily build maximal simple LineString components.
@@ -125,7 +131,6 @@ def _(List, Tuple, sg):
         return out
 
 
-
     def test_split_simple_0():
         # ---- Test 1: straight line, no repeats -> single component
         line1 = sg.LineString([(0, 0), (1, 0), (2, 0)])
@@ -134,18 +139,14 @@ def _(List, Tuple, sg):
         ]
 
         # ---- Test 2: loop then tail (includes a consecutive duplicate that should be ignored)
-        line2 = sg.LineString([
-            (0, 0), (1, 0), (1, 0), (1, 1), (0, 1), (0, 0), (0, 1)
-        ])
+        line2 = sg.LineString([(0, 0), (1, 0), (1, 0), (1, 1), (0, 1), (0, 0), (0, 1)])
         expected2 = [
             [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)],  # closed loop
-            [(0, 0), (0, 1)],                          # tail
+            [(0, 0), (0, 1)],  # tail
         ]
 
         # ---- Test 3: doubles back on an interior vertex
-        line3 = sg.LineString([
-            (0, 0), (2, 0), (2, 1), (1, 1), (1, 0), (2, 0), (3, 0)
-        ])
+        line3 = sg.LineString([(0, 0), (2, 0), (2, 1), (1, 1), (1, 0), (2, 0), (3, 0)])
         expected3 = [
             [(0, 0), (2, 0), (2, 1), (1, 1), (1, 0), (2, 0)],
             [(2, 0), (3, 0)],
@@ -166,8 +167,11 @@ def _(List, Tuple, sg):
             for i, (part, exp_coords) in enumerate(zip(parts, expected), start=1):
                 assert isinstance(part, sg.LineString), f"{name} comp {i}: not a LineString"
                 got = list(map(tuple, part.coords))
-                assert got == exp_coords, f"{name} comp {i}: coords mismatch.\nGot: {got}\nExp: {exp_coords}"
+                assert got == exp_coords, (
+                    f"{name} comp {i}: coords mismatch.\nGot: {got}\nExp: {exp_coords}"
+                )
                 assert part.is_simple, f"{name} comp {i}: returned LineString not simple"
+
 
     test_split_simple_0()
     return (split_simple_0,)
@@ -188,11 +192,11 @@ def _(feed, split_simple_0):
         print(list(ls.coords))
         segments = split_simple_0(ls)
         cum_length = 0
-        for s in  segments:
+        for s in segments:
             d = s.length
-            cum_length += d 
+            cum_length += d
             # print(s.is_simple, d)
-        
+
     # print(ls.length, cum_length)
     # g.explore()
     # print(list(ls.coords))
@@ -201,7 +205,9 @@ def _(feed, split_simple_0):
 
 @app.cell
 def _(feed, gk):
-    gk.split_simple(feed.get_shapes(as_geo=True, use_utm=False).head(5)).assign(is_simple=lambda x: x.is_simple) #.collect().st.to_wkt()
+    gk.split_simple(feed.get_shapes(as_geo=True, use_utm=False).head(5)).assign(
+        is_simple=lambda x: x.is_simple
+    )  # .collect().st.to_wkt()
     return
 
 
