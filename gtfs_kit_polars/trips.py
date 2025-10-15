@@ -244,9 +244,9 @@ def compute_trip_stats(
     route_ids: list[str | None] = None,
     *,
     compute_dist_from_shapes: bool = False,
-):
+) -> pl.LazyFrame:
     """
-    Return a DataFrame with the following columns:
+    Return a table with the following columns:
 
     - ``'trip_id'``
     - ``'route_id'``
@@ -598,33 +598,29 @@ def trips_to_geojson(
     include_stops: bool = False,
 ) -> dict:
     """
-    Return a GeoJSON FeatureCollection of LineString features representing
-    all the Feed's trips.
-    The coordinates reference system is the default one for GeoJSON,
-    namely WGS84.
+    Return a GeoJSON FeatureCollection (in WGS84 coordinates) of LineString features
+    representing all the Feed's trips.
 
     If ``include_stops``, then include the trip stops as Point features.
-    If an iterable of trip IDs is given, then subset to those trips.
-    If any of the given trip IDs are not found in the feed, then raise a ValueError.
-    If the Feed has no shapes, then raise a ValueError.
+    If an iterable of trip IDs is given, then subset to those trips, which could yield
+    an empty FeatureCollection in case of invalid trip IDs.
     """
-    if trip_ids is None or not list(trip_ids):
-        trip_ids = feed.trips.trip_id
+    g = get_trips(feed, as_geo=True)
+    if trip_ids:
+        g = g.filter(pl.col("trip_id").is_in(trip_ids))
 
-    D = set(trip_ids) - set(feed.trips.trip_id)
-    if D:
-        raise ValueError(f"Trip IDs {D} not found in feed.")
+    if g is None or hp.is_empty(g):
+        result = {
+            "type": "FeatureCollection",
+            "features": [],
+        }
+    else:
+        result = g.collect().st.__geo_interface__
+        if include_stops:
+            st_gj = feed.stop_times_to_geojson(trip_ids)
+            result["features"].extend(st_gj["features"])
 
-    # Get trips
-    g = get_trips(feed, as_geo=True).loc[lambda x: x["trip_id"].isin(trip_ids)]
-    trips_gj = json.loads(g.to_json())
-
-    # Get stops if desired
-    if include_stops:
-        st_gj = feed.stop_times_to_geojson(trip_ids)
-        trips_gj["features"].extend(st_gj["features"])
-
-    return hp.drop_feature_ids(trips_gj)
+    return result
 
 
 def map_trips(

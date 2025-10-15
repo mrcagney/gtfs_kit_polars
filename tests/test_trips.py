@@ -91,7 +91,7 @@ def test_name_stop_patterns():
 
     # Should still work without direction ID
     feed.trips = feed.trips.drop("direction_id")
-    t = gkt.name_stop_patterns(feed)
+    t = gkt.name_stop_patterns(feed).collect()
     assert set(t.columns) == expect_cols - {"direction_id"}
 
 
@@ -186,28 +186,26 @@ def test_locate_trips():
 
 def test_trips_to_geojson():
     feed = cairns.copy()
-    trip_ids = feed.trips.trip_id.loc[:1]
+    trip_ids = feed.trips.collect()["trip_id"].to_list()[:1]
     n = len(trip_ids)
     gj = gkt.trips_to_geojson(feed, trip_ids)
     assert len(gj["features"]) == n
 
     gj = gkt.trips_to_geojson(feed, trip_ids, include_stops=True)
     k = (
-        feed.stop_times.loc[lambda x: x.trip_id.isin(trip_ids)]
-        .drop_duplicates(subset=["trip_id", "stop_id"])
-        .shape[0]
+        feed.stop_times.filter(pl.col("trip_id").is_in(trip_ids))
+        .unique(subset=["trip_id", "stop_id"])
+        .collect()
+        .height
     )
     assert len(gj["features"]) == n + k
 
-    with pytest.raises(ValueError):
-        gkt.trips_to_geojson(cairns_shapeless)
-
-    with pytest.raises(ValueError):
-        gkt.trips_to_geojson(cairns, trip_ids=["bingo"])
+    gj = gkt.trips_to_geojson(cairns, trip_ids=["bingo"])
+    assert len(gj["features"]) == 0
 
 
 def test_map_trips():
     feed = cairns.copy()
-    tids = feed.trips["trip_id"].values[:2]
+    tids = feed.trips.collect()["trip_id"].to_list()[:2]
     m = gkt.map_trips(feed, tids, show_stops=True)
     assert isinstance(m, fl.Map)
