@@ -32,7 +32,6 @@ def get_stop_times(feed: "Feed", date: str | None = None) -> pl.LazyFrame:
     return st
 
 
-
 def get_start_and_end_times(feed: "Feed", date: str | None = None) -> tuple[str]:
     """
     Return the first departure time and last arrival time
@@ -42,7 +41,7 @@ def get_start_and_end_times(feed: "Feed", date: str | None = None) -> tuple[str]
     st = feed.get_stop_times(date)
     return (
         st.select("departure_time").drop_nulls().min().collect().row(0)[0],
-        st.select("arrival_time").drop_nulls().max().collect().row(0)[0]
+        st.select("arrival_time").drop_nulls().max().collect().row(0)[0],
     )
 
 
@@ -84,7 +83,7 @@ def stop_times_to_geojson(
 
     return result
 
-# TODO: test this
+
 def append_dist_to_stop_times(feed: "Feed") -> "Feed":
     """
     Calculate and append the optional ``shape_dist_traveled`` column in
@@ -116,9 +115,11 @@ def append_dist_to_stop_times(feed: "Feed") -> "Feed":
     )
     stops_geo = feed.get_stops(as_geo=True, use_utm=True).select("stop_id", "geometry")
     convert = hp.get_convert_dist("m", feed.dist_units)  # returns a Polars expr fn
-    final_cols = [c for c in feed.stop_times.schema if c != "shape_dist_traveled"] + [
-        "shape_dist_traveled"
-    ]
+    final_cols = [
+        c
+        for c in feed.stop_times.collect_schema().names()
+        if c != "shape_dist_traveled"
+    ] + ["shape_dist_traveled"]
 
     stop_times = (
         feed.stop_times.join(
@@ -128,8 +129,7 @@ def append_dist_to_stop_times(feed: "Feed") -> "Feed":
         .join(stops_geo.rename({"geometry": "stop_geom"}), on="stop_id", how="left")
         .sort("trip_id", "stop_sequence")
         .with_columns(
-            # seconds since midnight (mod 24) for interpolation fallback
-            dtime=hp.timestr_to_seconds("departure_time", mod24=True),
+            dtime=hp.timestr_to_seconds("departure_time"),
             # distances along the linestring (in meters), and line length
             dist=pl.when(
                 pl.col("shape_geom").is_not_null() & pl.col("stop_geom").is_not_null()
@@ -175,7 +175,7 @@ def append_dist_to_stop_times(feed: "Feed") -> "Feed":
         D = g["shape_length"][0]
         dists0 = g["dist"].to_list()
 
-        # No geometry length or single stop → trivial
+        # Do nothings for defunct cases
         if np.isnan(D) or len(dists0) <= 1:
             return g
 
@@ -192,7 +192,7 @@ def append_dist_to_stop_times(feed: "Feed") -> "Feed":
         stop_times.join(bad_trips, on="trip_id", how="inner")
         .sort("trip_id", "stop_sequence")
         .group_by("trip_id")
-        .map_groups(compute_dist, schema=stop_times.schema)
+        .map_groups(compute_dist, schema=stop_times.collect_schema())
     )
 
     good = stop_times.join(bad_trips, on="trip_id", how="anti")

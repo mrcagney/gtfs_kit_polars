@@ -18,13 +18,11 @@ from .context import (
 def test_get_stop_times():
     feed = cairns.copy()
     date = cairns_dates[0]
-    f = gks.get_stop_times(feed, date)
-    # Should be a data frame
-    assert isinstance(f, pd.core.frame.DataFrame)
+    f = gks.get_stop_times(feed, date).collect()
     # Should have a reasonable shape
-    assert f.shape[0] <= feed.stop_times.shape[0]
+    assert f.height <= feed.stop_times.collect().height
     # Should have correct columns
-    assert set(f.columns) == set(feed.stop_times.columns)
+    assert set(f.columns) == set(feed.stop_times.collect_schema().names())
 
 
 def test_get_start_and_end_times():
@@ -36,7 +34,12 @@ def test_get_start_and_end_times():
     for t in times:
         assert isinstance(t, str)
         # Should lie in stop times
-        assert t in st.to_pandas()[["departure_time", "arrival_time"]].dropna().values.flatten()
+        assert (
+            t
+            in st.to_pandas()[["departure_time", "arrival_time"]]
+            .dropna()
+            .values.flatten()
+        )
 
     # Should get null times in some cases
     times = gks.get_start_and_end_times(feed, "19690711")
@@ -45,7 +48,6 @@ def test_get_start_and_end_times():
     feed.stop_times = feed.stop_times.with_columns(departure_time=pl.lit(None))
     times = gks.get_start_and_end_times(feed)
     assert times[0] is None
-
 
 
 def test_stop_times_to_geojson():
@@ -70,9 +72,9 @@ def test_stop_times_to_geojson():
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def test_append_dist_to_stop_times():
     feed1 = cairns.copy()
-    st1 = feed1.stop_times
+    st1 = feed1.stop_times.collect()
     feed2 = gks.append_dist_to_stop_times(feed1)
-    st2 = feed2.stop_times
+    st2 = feed2.stop_times.collect()
 
     # Check that colums of st2 equal the columns of st1 plus
     # a shape_dist_traveled column
@@ -82,25 +84,30 @@ def test_append_dist_to_stop_times():
 
     # Check that within each trip the shape_dist_traveled column
     # is monotonically increasing
-    for trip, group in st2.groupby("trip_id"):
-        group = group.sort_values("stop_sequence")
-        sdt = group.shape_dist_traveled.values.tolist()
-        assert sdt == sorted(sdt)
+    for group in st2.partition_by("trip_id"):
+        sdt = group.sort("stop_sequence")["shape_dist_traveled"].to_list()
+        if any(sdt):
+            assert sdt == sorted(sdt)
 
-    # Trips with no shapes should have NaN distances
-    trip_id = feed1.stop_times["trip_id"].iat[0]
-    feed1.trips.loc[lambda x: x["trip_id"] == trip_id, "shape_id"] = np.nan
-
+    # Trips with no shapes should have null distances
+    shape_id = feed1.shapes.collect()["shape_id"][0]
+    trip_id = feed1.trips.filter(pl.col("shape_id") == shape_id).collect()["trip_id"][0]
+    feed1.trips = feed1.trips.with_columns(
+        shape_id=pl.when(pl.col("shape_id") == shape_id)
+        .then(None)
+        .otherwise(pl.col("shape_id"))
+    )
     feed2 = feed1.append_dist_to_stop_times()
     assert (
-        feed2.stop_times.loc[lambda x: x["trip_id"] == trip_id, "shape_dist_traveled"]
-        .isna()
+        feed2.stop_times.filter(pl.col("trip_id") == trip_id)
+        .collect()["shape_dist_traveled"]
+        .is_null()
         .all()
     )
 
     # Again, check that within each trip the shape_dist_traveled column
     # is monotonically increasing
-    for trip, group in feed2.stop_times.groupby("trip_id"):
-        group = group.sort_values("stop_sequence")
-        sdt = group.shape_dist_traveled.values.tolist()
-        assert sdt == sorted(sdt)
+    for group in feed2.stop_times.collect().partition_by("trip_id"):
+        sdt = group.sort("stop_sequence")["shape_dist_traveled"].to_list()
+        if any(sdt):
+            assert sdt == sorted(sdt)
