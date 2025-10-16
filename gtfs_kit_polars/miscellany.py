@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import polars as pl
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -19,10 +20,10 @@ if TYPE_CHECKING:
     from .feed import Feed
 
 
-def list_fields(feed: "Feed", table: str | None = None) -> pd.DataFrame:
+def list_fields(feed: "Feed", table_name: str | None = None) -> pl.LazyFrame:
     """
-    Return a DataFrame describing all the fields of the GTFS tables in the given feed
-    or in the given table if specified.
+    Return a DataFrame summarizing all GTFS tables in the given feed
+    or in the given table name if specified.
 
     The resulting DataFrame has the following columns.
 
@@ -41,52 +42,54 @@ def list_fields(feed: "Feed", table: str | None = None) -> pd.DataFrame:
     If the table is not valid, raise a ValueError
     """
     gtfs_tables = list(cs.DTYPES.keys())
-    if table is not None:
-        if table not in gtfs_tables:
-            raise ValueError(f"{table} is not a GTFS table")
+    if table_name is not None:
+        if table_name not in gtfs_tables:
+            raise ValueError(f"{table_name} is not a GTFS table")
         else:
-            tables = [table]
+            table_names = [table_name]
     else:
-        tables = gtfs_tables
+        table_names = gtfs_tables
 
     frames = []
-    for table in tables:
-        f = getattr(feed, table)
-        if f is None:
+    schema = {
+        "table": pl.Utf8,
+        "column": pl.Utf8,
+        "num_values": pl.Int64,
+        "num_nonnull_values": pl.Int64,
+        "num_unique_values": pl.Int64,
+        "min_value": pl.Utf8,
+        "max_value": pl.Utf8,
+    }
+    final_cols = list(schema.keys())
+    for table_name in table_names:
+        t = getattr(feed, table_name)
+        if t is None:
             continue
 
-        def my_agg(col):
-            d = {}
-            d["column"] = col.name
-            d["num_values"] = col.size
-            d["num_nonnull_values"] = col.count()
-            d["num_unique_values"] = col.nunique()
-            d["min_value"] = col.dropna().min()
-            d["max_value"] = col.dropna().max()
-            return pd.Series(d)
+        frames_0 = []
+        for col_name in t.collect_schema().names():
+            col = pl.col(col_name)
+            r = (
+                t.select(
+                    column=pl.lit(col_name),
+                    num_nonnull_values=col.count(),
+                    num_unique_values=col.drop_nulls().n_unique(),
+                    min_value=col.min().cast(pl.Utf8),
+                    max_value=col.max().cast(pl.Utf8),
+                    num_nulls=col.is_null().sum(),
+                )
+                .with_columns(
+                    num_values=pl.col("num_nonnull_values") + pl.col("num_nulls"),
+                    table=pl.lit(table_name),
+                )
+                .select(final_cols)
+            )
+            frames_0.append(r)
 
-        g = f.apply(my_agg).T.reset_index(drop=True)
-        g["table"] = table
-        frames.append(g)
+        s = pl.concat(frames_0) if frames_0 else pl.LazyFrame(schema=schema)
+        frames.append(s)
 
-    cols = [
-        "table",
-        "column",
-        "num_values",
-        "num_nonnull_values",
-        "num_unique_values",
-        "min_value",
-        "max_value",
-    ]
-
-    if not frames:
-        f = pd.DataFrame()
-    else:
-        f = pd.concat(frames)
-        # Rearrange columns
-        f = f[cols].copy()
-
-    return f
+    return pl.concat(frames, how="vertical") if frames else pl.LazyFrame(schema=schema)
 
 
 def describe(feed: "Feed", sample_date: str | None = None) -> pd.DataFrame:
