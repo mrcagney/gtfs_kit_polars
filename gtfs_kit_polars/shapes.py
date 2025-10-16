@@ -12,8 +12,8 @@ import pandas as pd
 import polars as pl
 import polars_st as st
 import shapely
-import shapely.ops as so
 import shapely.geometry as sg
+import shapely.ops as so
 
 from . import constants as cs
 from . import helpers as hp
@@ -259,7 +259,7 @@ def split_simple(
     each non-simple LineString L by ``segmentize_m`` meters,
     which also sets the maximum gap size between L's simple sub-LineStrings.
 
-    Return a geotabl in the CRS of ``shapes_g`` with the columns
+    Return a geotable in the CRS of ``shapes_g`` with the columns
 
     - ``'shape_id'``: a unique identifier of the original LineString L
     - ``'subshape_id'``: a unique identifier of a simple sub-LineString S of L

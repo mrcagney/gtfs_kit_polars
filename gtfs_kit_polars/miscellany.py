@@ -6,10 +6,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import polars as pl
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import polars as pl
+import polars_st as st
+import shapely as sl
 import shapely.geometry as sg
 
 from . import constants as cs
@@ -20,7 +22,7 @@ if TYPE_CHECKING:
     from .feed import Feed
 
 
-def list_fields(feed: "Feed", table_name: str | None = None) -> pl.DataFrame:
+def list_fields(feed: "Feed", table_name: str | None = None) -> pl.LazyFrame:
     """
     Return a DataFrame summarizing all GTFS tables in the given feed
     or in the given table name if specified.
@@ -297,7 +299,7 @@ def assess_quality(feed: "Feed") -> pd.DataFrame:
                 "assessment",
             ]
         )
-        .melt(variable_name="indicator", value_name="value")
+        .unpivot(variable_name="indicator", value_name="value")
         .with_columns(pl.col("value").cast(pl.Utf8))
     )
 
@@ -610,7 +612,7 @@ def compute_network_time_series(
     num_minutes: int = 60,
     *,
     split_route_types: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
     Compute some network stats in time series form for the given dates
     (YYYYMMDD date strings) and trip stats, which defaults to
@@ -807,47 +809,48 @@ def create_shapes(feed: "Feed", *, all_trips: bool = False) -> "Feed":
     return feed
 
 
-def compute_bounds(feed: "Feed", stop_ids: list[str] | None = None) -> np.array:
+def compute_bounds(feed: "Feed", stop_ids: list[str] | None = None) -> list:
     """
-    Return the bounding box (Numpy array [min longitude, min latitude, max longitude,
-    max latitude]) of the given Feed's stops or of the subset of stops
+    Return the bounding box [min longitude, min latitude, max longitude,
+    max latitude] of the given Feed's stops or of the subset of stops
     specified by the given stop IDs.
     """
     from .stops import get_stops
 
     g = get_stops(feed, as_geo=True)
     if stop_ids is not None:
-        g = g.loc[lambda x: x["stop_id"].isin(stop_ids)]
+        g = g.filter(pl.col("stop_id").is_in(stop_ids))
 
-    return g.total_bounds
+    return g.select(st.geom().st.total_bounds()).head(1).collect().row(0)[0]
 
 
 def compute_convex_hull(feed: "Feed", stop_ids: list[str] | None = None) -> sg.Polygon:
     """
-    Return a convex hull (Shapely Polygon) representing the convex hull of the given
-    Feed's stops or of the subset of stops specified by the given stop IDs.
+    Return the convex hull in WGS84 coordinates of the given Feed's stops or subset thereof
+    specified by the given stop IDs.
     """
     from .stops import get_stops
 
     g = get_stops(feed, as_geo=True)
     if stop_ids is not None:
-        g = g.loc[lambda x: x["stop_id"].isin(stop_ids)]
+        g = g.filter(pl.col("stop_id").is_in(stop_ids))
 
-    return g.union_all().convex_hull
+    return sl.from_wkb(g.select(st.geom().st.union_all().st.convex_hull()).head(1).collect().row(0)[0])
+
 
 
 def compute_centroid(feed: "Feed", stop_ids: list[str] | None = None) -> sg.Point:
     """
-    Return the centroid (Shapely Point) of the convex hull the given Feed's stops
-    or of the subset of stops specified by the given stop IDs.
+    Return the centroid of the convex hull of the given Feed's stops
+    or subset of thereof specified by the given stop IDs.
     """
     from .stops import get_stops
 
     g = get_stops(feed, as_geo=True)
     if stop_ids is not None:
-        g = g.loc[lambda x: x["stop_id"].isin(stop_ids)]
+        g = g.filter(pl.col("stop_id").is_in(stop_ids))
 
-    return g.union_all().convex_hull.centroid
+    return sl.from_wkb(g.select(st.geom().st.union_all().st.convex_hull().st.centroid()).head(1).collect().row(0)[0])
 
 
 def restrict_to_trips(feed: "Feed", trip_ids: list[str]) -> "Feed":
@@ -862,62 +865,92 @@ def restrict_to_trips(feed: "Feed", trip_ids: list[str]) -> "Feed":
     This function is probably more useful internally than externally.
     """
     feed = feed.copy()
-    has_agency_ids = "agency_id" in feed.routes.columns
+    has_agency_ids = "agency_id" in feed.routes.collect_schema().names()
 
-    # Subset trips
-    feed.trips = feed.trips.loc[lambda x: x.trip_id.isin(trip_ids)].copy()
+    # Empty input → return empties with preserved schema
+    if not trip_ids:
+        feed.trips = feed.trips.limit(0)
+        feed.routes = feed.routes.limit(0)
+        feed.stop_times = feed.stop_times.limit(0)
+        feed.stops = feed.stops.limit(0)
+        if feed.calendar is not None:
+            feed.calendar = feed.calendar.limit(0)
+        if has_agency_ids and (feed.agency is not None):
+            feed.agency = feed.agency.limit(0)
+        if feed.calendar_dates is not None:
+            feed.calendar_dates = feed.calendar_dates.limit(0)
+        if feed.frequencies is not None:
+            feed.frequencies = feed.frequencies.limit(0)
+        if feed.shapes is not None:
+            feed.shapes = feed.shapes.limit(0)
+        if feed.transfers is not None:
+            feed.transfers = feed.transfers.limit(0)
+        return feed
 
-    # Subset routes
-    feed.routes = feed.routes.loc[lambda x: x.route_id.isin(feed.trips.route_id)].copy()
+    trip_ids_lf = pl.LazyFrame({"trip_id": trip_ids}).unique()
 
-    # Subset stop times
-    feed.stop_times = feed.stop_times.loc[lambda x: x.trip_id.isin(trip_ids)].copy()
+    # trips
+    feed.trips = feed.trips.join(trip_ids_lf, on="trip_id", how="semi")
 
-    # Subset stops, collecting parent stations too
-    stop_ids_0 = set(feed.stop_times["stop_id"])
-    stop_ids_1 = set(
-        feed.stops.loc[
-            lambda x: x["stop_id"].isin(stop_ids_0), "parent_station"
-        ].dropna()
+    # routes
+    route_ids = feed.trips.select("route_id").unique()
+    feed.routes = feed.routes.join(route_ids, on="route_id", how="semi")
+
+    # stop_times
+    feed.stop_times = feed.stop_times.join(trip_ids_lf, on="trip_id", how="semi")
+
+    # stops (+ parent stations)
+    stop_ids_0 = feed.stop_times.select("stop_id").unique()
+    parent_ids = (
+        feed.stops.join(stop_ids_0, on="stop_id", how="semi")
+        .select("parent_station")
+        .drop_nulls()
+        .unique()
+        .rename({"parent_station": "stop_id"})
     )
-    stop_ids = stop_ids_0 | stop_ids_1
-    feed.stops = feed.stops.loc[lambda x: x["stop_id"].isin(stop_ids)].copy()
+    stop_ids = pl.concat([stop_ids_0, parent_ids]).unique()
+    feed.stops = feed.stops.join(stop_ids, on="stop_id", how="semi")
 
-    # Subset calendar
-    service_ids = feed.trips["service_id"].unique()
+    # calendar
+    service_ids = feed.trips.select("service_id").unique()
     if feed.calendar is not None:
-        feed.calendar = feed.calendar.loc[
-            lambda x: x.service_id.isin(service_ids)
-        ].copy()
+        feed.calendar = feed.calendar.join(service_ids, on="service_id", how="semi")
 
-    # Subset agency
-    if has_agency_ids:
-        agency_ids = feed.routes["agency_id"]
-        feed.agency = feed.agency.loc[lambda x: x.agency_id.isin(agency_ids)].copy()
+    # agency
+    if has_agency_ids and (feed.agency is not None):
+        agency_ids = feed.routes.select("agency_id")
+        feed.agency = feed.agency.join(agency_ids, on="agency_id", how="semi")
 
-    # Now for the optional files.
-    # Subset calendar dates.
+    # calendar_dates
     if feed.calendar_dates is not None:
-        feed.calendar_dates = feed.calendar_dates.loc[
-            lambda x: x.service_id.isin(service_ids)
-        ].copy()
+        feed.calendar_dates = feed.calendar_dates.join(
+            service_ids, on="service_id", how="semi"
+        )
 
-    # Subset frequencies
+    # frequencies
     if feed.frequencies is not None:
-        feed.frequencies = feed.frequencies.loc[
-            lambda x: x.trip_id.isin(trip_ids)
-        ].copy()
+        feed.frequencies = feed.frequencies.join(trip_ids_lf, on="trip_id", how="semi")
 
-    # Subset shapes
+    # shapes
     if feed.shapes is not None:
-        shape_ids = feed.trips.shape_id
-        feed.shapes = feed.shapes.loc[lambda x: x.shape_id.isin(shape_ids)].copy()
+        shape_ids = feed.trips.select("shape_id").drop_nulls().unique()
+        feed.shapes = feed.shapes.join(shape_ids, on="shape_id", how="semi")
 
-    # Subset transfers
+    # transfers (both endpoints must remain)
     if feed.transfers is not None:
-        feed.transfers = feed.transfers.loc[
-            lambda x: x.from_stop_id.isin(stop_ids) & x.to_stop_id.isin(stop_ids)
-        ].copy()
+        feed.transfers = (
+            feed.transfers
+            .join(
+                stop_ids.rename({"stop_id": "from_stop_id"}),
+                on="from_stop_id",
+                how="semi",
+            )
+            .join(
+                stop_ids.rename({"stop_id": "to_stop_id"}),
+                on="to_stop_id",
+                how="semi",
+            )
+        )
 
     return feed
 
@@ -928,7 +961,7 @@ def restrict_to_routes(feed: "Feed", route_ids: list[str]) -> "Feed":
     the trips with the given route IDs.
     Return the resulting feed.
     """
-    trip_ids = feed.trips.loc[lambda x: x.route_id.isin(route_ids), "trip_id"].tolist()
+    trip_ids = feed.trips.filter(pl.col("route_id").is_in(route_ids)).collect()["trip_id"].to_list()
     return restrict_to_trips(feed, trip_ids)
 
 
@@ -938,13 +971,8 @@ def restrict_to_agencies(feed: "Feed", agency_ids: list[str]) -> "Feed":
     the routes with the given agency IDs.
     Return the resulting feed.
     """
-    # Build feed via `restrict_to_routes`
-    feed = feed.copy()
-    route_ids = feed.routes.loc[
-        lambda x: x.agency_id.isin(agency_ids), "route_id"
-    ].tolist()
-
-    return feed.restrict_to_routes(route_ids)
+    route_ids = feed.routes.filter(pl.col("agency_id").is_in(agency_ids)).collect()["route_id"].to_list()
+    return restrict_to_routes(feed, route_ids)
 
 
 def restrict_to_dates(feed: "Feed", dates: list[str]) -> "Feed":
@@ -953,34 +981,30 @@ def restrict_to_dates(feed: "Feed", dates: list[str]) -> "Feed":
     the trips active on at least one of the given dates (YYYYMMDD strings).
     Return the resulting feed.
     """
-    # Get every trip that is active on at least one of the dates
     trip_activity = feed.compute_trip_activity(dates)
-    if trip_activity.is_empty():
+    if hp.is_empty(trip_activity):
         trip_ids = []
     else:
-        trip_ids = trip_activity.loc[
-            lambda x: x.filter(dates).sum(axis=1) > 0,
-            "trip_id",
-        ]
+        # Get every trip that is active on at least one of the dates
+        trip_ids = trip_activity.filter(pl.sum_horizontal(*dates) > 0).collect()["trip_id"].to_list()
 
     return restrict_to_trips(feed, trip_ids)
 
 
-def restrict_to_area(feed: "Feed", area: gpd.GeoDataFrame) -> "Feed":
+def restrict_to_area(feed: "Feed", area: st.GeoDataFrame|st.GeoLazyFrame) -> "Feed":
     """
     Build a new feed by restricting this one via :func:`restrict_to_trips`
-    and the trips that have at least one stop intersecting the given GeoDataFrame of
-    polygons.
+    and the trips that have at least one stop intersecting the given geotable of
+    polygons, which can be in any coordinate reference system.
     Return the resulting feed.
     """
     from .stops import get_stops_in_area
 
     # Get IDs of stops within the polygon
-    stop_ids = get_stops_in_area(feed, area).stop_id
+    stops = get_stops_in_area(feed, area).select("stop_id")
 
     # Get all trips with at least one of those stops
-    st = feed.stop_times.copy()
-    trip_ids = st.loc[lambda x: x.stop_id.isin(stop_ids), "trip_id"]
+    trip_ids = feed.stop_times.join(stops, "stop_id", how="semi").select("trip_id").unique().collect()["trip_id"].to_list()
 
     return restrict_to_trips(feed, trip_ids)
 
