@@ -31,7 +31,7 @@ Progress porting the Pandas original to Polars.
 [x] feed.py
 [] helpers.py
 [] miscellany.py
-[] routes.py
+[x] routes.py
 [x] shapes.py
 [x] stop_times.py
 [x] stops.py

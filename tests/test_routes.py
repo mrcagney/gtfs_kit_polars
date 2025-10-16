@@ -10,6 +10,7 @@ import pytest
 
 from gtfs_kit_polars import constants as cs
 from gtfs_kit_polars import routes as gkr
+from gtfs_kit_polars import helpers as gkh
 
 from .context import (
     DATA_DIR,
@@ -26,31 +27,28 @@ sample = gtfs_kit_polars.read_feed(DATA_DIR / "sample_gtfs_2.zip", dist_units="k
 def test_get_routes():
     feed = cairns.copy()
     date = cairns_dates[0]
-    f = gkr.get_routes(feed, date)
-    # Should have the correct shape
-    assert f.shape[0] <= feed.routes.shape[0]
-    assert f.shape[1] == feed.routes.shape[1]
+    f = gkr.get_routes(feed, date).collect()
+    # Should have the correct height
+    assert f.height <= feed.routes.collect().height
     # Should have correct columns
-    assert set(f.columns) == set(feed.routes.columns)
+    assert set(f.columns) == set(feed.routes.collect().columns)
 
-    g = gkr.get_routes(feed, date, "07:30:00")
-    # Should have the correct shape
-    assert g.shape[0] <= f.shape[0]
-    assert g.shape[1] == f.shape[1]
+    g = gkr.get_routes(feed, date, "07:30:00").collect()
+    # Should have the correct height
+    assert g.height <= f.height
     # Should have correct columns
-    assert set(g.columns) == set(feed.routes.columns)
+    assert set(g.columns) == set(f.columns)
 
-    # Test GDF options
+    # Test geo options
     feed = cairns.copy()
-    g = gkr.get_routes(feed, as_geo=True, use_utm=True)
-    assert isinstance(g, gpd.GeoDataFrame)
-    assert g.crs != cs.WGS84
+    g = gkr.get_routes(feed, as_geo=True, use_utm=True).collect()
+    assert gkh.get_srid(g) != cs.WGS84
 
-    g = gkr.get_routes(feed, as_geo=True, split_directions=True)
-    assert g.crs == cs.WGS84
+    g = gkr.get_routes(feed, as_geo=True, split_directions=True).collect()
+    assert gkh.get_srid(g) == cs.WGS84
     assert (
-        g.shape[0]
-        == feed.trips[["route_id", "direction_id"]].drop_duplicates().shape[0]
+        g.height
+        == feed.trips.select("route_id", "direction_id").unique().collect().height
     )
 
     with pytest.raises(ValueError):
@@ -58,10 +56,10 @@ def test_get_routes():
 
     # Test written by Gilles Cuyaubere
     feed = gtfs_kit_polars.Feed(dist_units="km")
-    feed.agency = pd.DataFrame(
+    feed.agency = pl.LazyFrame(
         {"agency_id": ["agency_id_0"], "agency_name": ["agency_name_0"]}
     )
-    feed.routes = pd.DataFrame(
+    feed.routes = pl.LazyFrame(
         {
             "route_id": ["route_id_0"],
             "agency_id": ["agency_id_0"],
@@ -74,7 +72,7 @@ def test_get_routes():
             "route_text_color": [None],
         }
     )
-    feed.trips = pd.DataFrame(
+    feed.trips = pl.LazyFrame(
         {
             "route_id": ["route_id_0"],
             "service_id": ["service_id_0"],
@@ -89,7 +87,7 @@ def test_get_routes():
             "shape_id": ["shape_id_0"],
         }
     )
-    feed.shapes = pd.DataFrame(
+    feed.shapes = pl.LazyFrame(
         {
             "shape_id": ["shape_id_0", "shape_id_0"],
             "shape_pt_lon": [2.36, 2.37],
@@ -97,7 +95,7 @@ def test_get_routes():
             "shape_pt_sequence": [0, 1],
         }
     )
-    feed.stops = pd.DataFrame(
+    feed.stops = pl.LazyFrame(
         {
             "stop_id": ["stop_id_0", "stop_id_1"],
             "stop_name": ["stop_name_0", "stop_name_1"],
@@ -111,7 +109,7 @@ def test_get_routes():
             "wheelchair_boarding": [None, None],
         }
     )
-    feed.stop_times = pd.DataFrame(
+    feed.stop_times = pl.LazyFrame(
         {
             "trip_id": ["trip_id_0", "trip_id_0"],
             "arrival_time": ["11:40:00", "11:45:00"],
@@ -125,46 +123,47 @@ def test_get_routes():
     )
 
     g = gkr.get_routes(feed, as_geo=True)
-    assert g.crs == cs.WGS84
+    assert gkh.get_srid(g) == cs.WGS84
 
-    # Turning a route's shapes into point geometries,
-    # should yield an empty route geometry and should not throw an error
-    rid = feed.routes["route_id"].iat[0]
-    shids = feed.trips.loc[lambda x: x["route_id"] == rid, "shape_id"]
-    f0 = feed.shapes.loc[lambda x: x["shape_id"].isin(shids)].drop_duplicates(
-        "shape_id"
-    )
-    f1 = feed.shapes.loc[lambda x: ~x["shape_id"].isin(shids)]
-    feed.shapes = pd.concat([f0, f1])
+    # Turning a route shapes into point or None geometries
+    # should yield empty route geometries and not raise an error
+    rid = feed.routes.collect()["route_id"].item(0)
+    shids = feed.trips.filter(pl.col("route_id") == rid).collect()["shape_id"].to_list()
+    feed.shapes = feed.shapes.filter(pl.col("shape_id").is_in(shids)).unique("shape_id")
     assert (
         feed.get_routes(as_geo=True)
-        .loc[lambda x: x["route_id"] == rid, "geometry"]
-        .iat[0]
-        is None
+        .filter(pl.col("route_id") == rid)
+        .with_columns(is_empty=st.geom().st.is_empty())
+        .collect()["is_empty"]
+        .all()
     )
 
 
 def test_build_route_timetable():
-    feed = sample.copy()
-    route_id = feed.routes["route_id"].values[0]
-    dates = feed.get_first_week()[:2]
-    f = gkr.build_route_timetable(feed, route_id, dates)
+    feed = cairns.copy()
+    route_id = feed.routes.head().collect()["route_id"].item(0)
+    dates = cairns_dates
+    f = gkr.build_route_timetable(feed, route_id, dates).collect()
 
     # Should have the correct columns
-    expect_cols = set(feed.trips.columns) | set(feed.stop_times.columns) | set(["date"])
+    expect_cols = (
+        set(feed.trips.collect_schema().names())
+        | set(feed.stop_times.collect_schema().names())
+        | {"date"}
+    )
     assert set(f.columns) == expect_cols
 
     # Should only have feed dates
-    assert f.date.unique().tolist() == dates
+    assert set(f["date"].to_list()) == set(dates)
 
     # Empty check
-    f = gkr.build_route_timetable(feed, route_id, dates[2:])
-    assert f.is_empty()
+    f = gkr.build_route_timetable(feed, route_id, ["19990101"]).collect()
+    assert gkh.is_empty(f)
 
 
 def test_routes_to_geojson():
     feed = cairns.copy()
-    route_ids = feed.routes.route_id.loc[:1]
+    route_ids = feed.routes.head(2).collect()["route_id"].to_list()
     n = len(route_ids)
 
     gj = gkr.routes_to_geojson(feed, route_ids)
@@ -172,23 +171,26 @@ def test_routes_to_geojson():
 
     gj = gkr.routes_to_geojson(feed, route_ids, include_stops=True)
     k = (
-        feed.stop_times.merge(feed.trips.filter(["trip_id", "route_id"]))
-        .loc[lambda x: x.route_id.isin(route_ids), "stop_id"]
-        .nunique()
+        feed.stop_times.join(feed.trips, "trip_id")
+        .filter(pl.col("route_id").is_in(route_ids))
+        .select("stop_id")
+        .unique()
+        .collect()
+        .height
     )
     assert len(gj["features"]) == n + k
 
     with pytest.raises(ValueError):
         gkr.routes_to_geojson(cairns_shapeless)
 
-    with pytest.raises(ValueError):
-        gkr.routes_to_geojson(cairns, route_ids=["bingo"])
+    gj = gkr.routes_to_geojson(cairns, route_ids=["bingo"])
+    assert len(gj["features"]) == 0
 
 
 def test_map_routes():
     feed = cairns.copy()
-    rids = feed.routes["route_id"].iloc[:1]
-    rsns = feed.routes["route_short_name"].iloc[-2:]
+    rids = feed.routes.head(1).collect()["route_id"].to_list()
+    rsns = feed.routes.head(2).collect()["route_short_name"].to_list()[-2:]
     m = gkr.map_routes(feed, route_ids=rids, route_short_names=rsns, show_stops=True)
     assert isinstance(m, fl.Map)
 

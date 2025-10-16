@@ -602,8 +602,8 @@ def trips_to_geojson(
     representing all the Feed's trips.
 
     If ``include_stops``, then include the trip stops as Point features.
-    If an iterable of trip IDs is given, then subset to those trips, which could yield
-    an empty FeatureCollection in case of invalid trip IDs.
+    If an iterable of trip IDs is given, then subset to those trips,
+    which could yield an empty FeatureCollection in case all invalid trip IDs.
     """
     g = get_trips(feed, as_geo=True)
     if trip_ids:

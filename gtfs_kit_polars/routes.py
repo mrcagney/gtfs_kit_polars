@@ -25,9 +25,71 @@ if TYPE_CHECKING:
     from .feed import Feed
 
 
+def get_routes(
+    feed: "Feed",
+    date: str | None = None,
+    time: str | None = None,
+    *,
+    as_geo: bool = False,
+    use_utm: bool = False,
+    split_directions: bool = False,
+) -> pl.LazyFrame:
+    """
+    Return ``feed.routes`` or a subset thereof.
+    If a YYYYMMDD date string is given, then restrict routes to only those active on
+    the date.
+    If a HH:MM:SS time string is given, possibly with HH > 23, then restrict routes
+    to only those active during the time.
+    If ``as_geo``, return a geotable with all the columns of ``feed.routes``
+    plus a geometry column of (Multi)LineStrings, each of which represents the
+    corresponding routes's shape.
+
+    If ``as_geo`` and ``feed.shapes`` is not None, then return the routes as a
+    geotable with a 'geometry' column of (Multi)LineStrings.
+    The geotable will have a local UTM SRID if ``use_utm``; otherwise it will have
+    the WGS84 SRID.
+    If ``as_geo`` and ``split_directions``, then add the column ``direction_id`` and
+    split each route into the union of its direction 0 shapes
+    and the union of its direction 1 shapes.
+    If ``as_geo`` and ``feed.shapes`` is ``None``, then raise a ValueError.
+    """
+    from .trips import get_trips
+
+    trips = get_trips(feed, date=date, time=time, as_geo=as_geo, use_utm=use_utm)
+    r = feed.routes.join(trips.select("route_id").unique(), on="route_id", how="semi")
+
+    if not as_geo:
+        return r
+
+    # Need shapes/geometry to build route lines
+    if getattr(feed, "shapes", None) is None:
+        raise ValueError("This Feed has no shapes")
+
+    # Columns and grouping config
+    if split_directions:
+        groupby_cols = ["route_id", "direction_id"]
+        final_cols = list(r.collect_schema().names()) + ["direction_id", "geometry"]
+    else:
+        groupby_cols = ["route_id"]
+        final_cols = list(r.collect_schema().names()) + ["geometry"]
+
+    # Build a geometry per (route_id [, direction_id]) by unioning distinct shapes,
+    # then line-merging to simplify MultiLineString parts into maximal LineStrings.
+    return (
+        trips.select(groupby_cols + ["shape_id", "geometry"])
+        .unique(subset=["shape_id"])  # drop duplicate shapes
+        .group_by(groupby_cols)
+        .agg(
+            geometry=pl.col("geometry").st.union_all().st.line_merge(),
+        )
+        .join(r, on="route_id", how="right")
+        .select(final_cols)
+    )
+
+
 def build_route_timetable(
     feed: "Feed", route_id: str, dates: list[str]
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
     Return a timetable for the given route and dates (YYYYMMDD date strings).
 
@@ -43,108 +105,33 @@ def build_route_timetable(
     an empty DataFrame.
     """
     dates = feed.subset_dates(dates)
-    final_cols = (
-        ["date"] + feed.trips.columns.tolist() + feed.stop_times.columns.tolist()
-    )
     if not dates:
-        return pd.DataFrame(columns=final_cols)
+        # Empty result with correct schema
+        schema = {
+            **{k: v for k, v in feed.trips.collect_schema().items()},
+            **{k: v for k, v in feed.stop_times.collect_schema().items()},
+        }
+        schema["date"] = pl.Utf8
+        return pl.LazyFrame(schema=schema)
 
-    t = pd.merge(feed.trips, feed.stop_times)
-    t = t[t["route_id"] == route_id].copy()
+    s = (
+        feed.stop_times.join(feed.trips, "trip_id")
+        .filter(pl.col("route_id") == route_id)
+        .with_columns(trip_start_time=pl.col("departure_time").min().over("trip_id"))
+    )
     a = feed.compute_trip_activity(dates)
-
     frames = []
     for date in dates:
         # Slice to trips active on date
-        ids = a.loc[a[date] == 1, "trip_id"]
-        f = t[t["trip_id"].isin(ids)].copy()
-        f["date"] = date
-        # Groupby trip ID and sort groups by their minimum departure time.
-        # For some reason NaN departure times mess up the transform below.
-        # So temporarily fill NaN departure times as a workaround.
-        f["dt"] = f["departure_time"].ffill().map(hp.timestr_to_seconds)
-        f["min_dt"] = f.groupby("trip_id")["dt"].transform("min")
+        ids = a.filter(pl.col(date) == 1).collect()["trip_id"].to_list()
+        f = s.filter(pl.col("trip_id").is_in(ids)).with_columns(date=pl.lit(date))
         frames.append(f)
 
     return (
-        pd.concat(frames)
-        .sort_values(["date", "min_dt", "stop_sequence"], ignore_index=True)
-        .filter(final_cols)
+        pl.concat(frames)
+        .sort("date", "trip_start_time", "stop_sequence")
+        .drop("trip_start_time")
     )
-
-
-def get_routes(
-    feed: "Feed",
-    date: str | None = None,
-    time: str | None = None,
-    *,
-    as_geo: bool = False,
-    use_utm: bool = False,
-    split_directions: bool = False,
-) -> pd.DataFrame:
-    """
-    Return ``feed.routes`` or a subset thereof.
-    If a YYYYMMDD date string is given, then restrict routes to only those active on
-    the date.
-    If a HH:MM:SS time string is given, possibly with HH > 23, then restrict routes
-    to only those active during the time.
-
-    Given a Feed, return a GeoDataFrame with all the columns of ``feed.routes``
-    plus a geometry column of (Multi)LineStrings, each of which represents the
-    corresponding routes's shape.
-
-    If ``as_geo`` and ``feed.shapes`` is not ``None``,
-    then return a GeoDataFrame with all the columns of ``feed.routes``
-    plus a geometry column of (Multi)LineStrings, each of which represents the
-    corresponding routes's union of trip shapes.
-    The GeoDataFrame will have a local UTM CRS if ``use_utm``; otherwise it will have
-    CRS WGS84.
-    If ``split_directions`` and ``as_geo``, then add the column ``direction_id`` and
-    split each route into the union of its direction 0 shapes
-    and the union of its direction 1 shapes.
-    If ``as_geo`` and ``feed.shapes`` is ``None``, then raise a ValueError.
-    """
-    from .trips import get_trips
-
-    trips = get_trips(feed, date=date, time=time, as_geo=as_geo, use_utm=use_utm)
-    f = feed.routes[lambda x: x["route_id"].isin(trips["route_id"])]
-
-    if as_geo:
-        if feed.shapes is None:
-            raise ValueError("This Feed has no shapes.")
-
-        if split_directions:
-            groupby_cols = ["route_id", "direction_id"]
-            final_cols = f.columns.tolist() + ["direction_id", "geometry"]
-        else:
-            groupby_cols = ["route_id"]
-            final_cols = f.columns.tolist() + ["geometry"]
-
-        def merge_lines(group):
-            lines = [
-                g
-                for g in group["geometry"]
-                if g and g.geom_type in ["LineString", "MultiLineString"]
-            ]
-            if not lines:
-                return pd.Series({"geometry": None})
-            return pd.Series({"geometry": so.linemerge(lines)})
-
-        f = (
-            trips
-            # Drop unnecessary duplicate shapes
-            .drop_duplicates(subset=["shape_id", "route_id"])
-            .filter(groupby_cols + ["geometry"])
-            .groupby(groupby_cols)
-            .apply(merge_lines, include_groups=False)
-            .reset_index()
-            .merge(f, how="right")
-            .pipe(gpd.GeoDataFrame)
-            .set_crs(trips.crs)
-            .filter(final_cols)
-        )
-
-    return f
 
 
 def routes_to_geojson(
@@ -155,41 +142,38 @@ def routes_to_geojson(
     include_stops: bool = False,
 ) -> dict:
     """
-    Return a GeoJSON FeatureCollection of MultiLineString features representing this Feed's routes.
-    The coordinates reference system is the default one for GeoJSON,
-    namely WGS84.
+    Return a GeoJSON FeatureCollection (in WGS84 coordinates) of MultiLineString
+    features representing this Feed's routes.
 
-    If ``include_stops``, then include the route stops as Point features .
-    If an iterable of route IDs is given, then subset to those routes.
-    If the subset is empty, then return a FeatureCollection with an empty list of
-    features.
+    If an iterable of route IDs is given, then subset to those routes, which could
+    yield an empty FeatureCollection in case of all invalid route IDs.
+    If ``include_stops``, then include the route stops as Point features.
     If the Feed has no shapes, then raise a ValueError.
-    If any of the given route IDs are not found in the feed, then raise a ValueError.
     """
-    if route_ids is None or not list(route_ids):
-        route_ids = feed.routes.route_id
+    g = get_routes(feed, as_geo=True, split_directions=split_directions)
+    if route_ids:
+        g = g.filter(pl.col("route_id").is_in(route_ids))
 
-    D = set(route_ids) - set(feed.routes.route_id)
-    if D:
-        raise ValueError(f"Route IDs {D} not found in feed.")
+    if g is None or hp.is_empty(g):
+        result = {
+            "type": "FeatureCollection",
+            "features": [],
+        }
+    else:
+        result = g.collect().st.__geo_interface__
+        if include_stops:
+            stop_ids = (
+                feed.stop_times.join(feed.trips, "trip_id")
+                .filter(pl.col("route_id").is_in(route_ids))
+                .select("stop_id")
+                .unique()
+                .collect()["stop_id"]
+                .to_list()
+            )
+            s_gj = feed.stops_to_geojson(stop_ids)
+            result["features"].extend(s_gj["features"])
 
-    # Get routes
-    g = get_routes(feed, as_geo=True, split_directions=split_directions).loc[
-        lambda x: x["route_id"].isin(route_ids)
-    ]
-    collection = json.loads(g.to_json())
-
-    # Get stops if desired
-    if len(route_ids) and include_stops:
-        stop_ids = (
-            feed.stop_times.merge(feed.trips.filter(["trip_id", "route_id"]))
-            .loc[lambda x: x.route_id.isin(route_ids), "stop_id"]
-            .unique()
-        )
-        stops_gj = feed.stops_to_geojson(stop_ids=stop_ids)
-        collection["features"].extend(stops_gj["features"])
-
-    return hp.drop_feature_ids(collection)
+    return result
 
 
 def map_routes(
@@ -210,9 +194,9 @@ def map_routes(
     R = set()
     if route_short_names is not None:
         R |= set(
-            feed.routes.loc[
-                lambda x: x["route_short_name"].isin(route_short_names), "route_id"
-            ]
+            feed.routes.filter(pl.col("route_short_name").is_in(route_short_names))
+            .collect()["route_id"]
+            .to_list()
         )
     if route_ids is not None:
         R |= set(route_ids)

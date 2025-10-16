@@ -32,15 +32,15 @@ def _():
     warnings.filterwarnings("ignore")
 
     DATA = pb.Path("data")
-    return DATA, List, gk, np, pl, sg
+    return List, gk, pb, pl, sg
 
 
 @app.cell
-def _(DATA, gk):
+def _(gk, pb):
     # akl_url = "https://gtfs.at.govt.nz/gtfs.zip"
     # feed = gk.read_feed(akl_url, dist_units="km")
-    # feed = gk.read_feed(pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km")
-    feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
+    feed = gk.read_feed(pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km")
+    #feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
     return (feed,)
 
 
@@ -53,142 +53,9 @@ def _(feed):
 
 
 @app.cell
-def _(gk, np, pl):
-    def append_dist_to_stop_times(feed: "Feed") -> "Feed":
-        """
-        Calculate and append the optional ``shape_dist_traveled`` column in
-        ``feed.stop_times`` in terms of the distance units ``feed.dist_units``.
-        Trips without shapes will have NaN distances.
-        Return the resulting Feed.
-        Uses ``feed.shapes``, so if that is missing, then return the original feed.
-
-        This does not always give accurate results.
-        The algorithm works as follows.
-        Compute the ``shape_dist_traveled`` field by using Shapely to
-        measure the distance of a stop along its trip LineString.
-        If for a given trip this process produces a non-monotonically
-        increasing, hence incorrect, list of (cumulative) distances, then
-        fall back to estimating the distances as follows.
-
-        Set the first distance to 0, the last to the length of the trip shape,
-        and leave the remaining ones computed above.
-        Choose the longest increasing subsequence of that new set of
-        distances and use them and their corresponding departure times to linearly
-        interpolate the rest of the distances.
-        """
-        hp = gk
-        if getattr(feed, "shapes", None) is None or hp.is_empty(feed.shapes):
-            return feed
-
-        # Prepare data, building geometry tables in UTM (meters)
-        shapes_geo = feed.get_shapes(as_geo=True, use_utm=True).select(
-            "shape_id", "geometry"
-        )
-        stops_geo = feed.get_stops(as_geo=True, use_utm=True).select("stop_id", "geometry")
-        convert = hp.get_convert_dist("m", feed.dist_units)  # returns a Polars expr fn
-        final_cols = [c for c in feed.stop_times.collect_schema().names() if c != "shape_dist_traveled"] + [
-            "shape_dist_traveled"
-        ]
-
-        stop_times = (
-            feed.stop_times.join(
-                feed.trips.select("trip_id", "shape_id"), on="trip_id", how="left"
-            )
-            .join(shapes_geo.rename({"geometry": "shape_geom"}), on="shape_id", how="left")
-            .join(stops_geo.rename({"geometry": "stop_geom"}), on="stop_id", how="left")
-            .sort("trip_id", "stop_sequence")
-            .with_columns(
-                dtime=hp.timestr_to_seconds("departure_time"),
-                # distances along the linestring (in meters), and line length
-                dist=pl.when(
-                    pl.col("shape_geom").is_not_null() & pl.col("stop_geom").is_not_null()
-                )
-                .then(pl.col("shape_geom").st.project(pl.col("stop_geom")))
-                .otherwise(None)
-                .cast(pl.Float64),
-                shape_length=pl.col("shape_geom").st.length().cast(pl.Float64),
-            )
-            # Fix reversed direction trips
-            .with_columns(
-                first_dist=pl.col("dist").first().over("trip_id"),
-                last_dist=pl.col("dist").last().over("trip_id"),
-            )
-            .with_columns(
-                need_flip=(pl.col("last_dist") < pl.col("first_dist"))
-                & pl.col("shape_length").is_not_null(),
-            )
-            .with_columns(
-                dist=pl.when(pl.col("need_flip"))
-                .then(pl.col("shape_length") - pl.col("dist"))
-                .otherwise(pl.col("dist"))
-            )
-            .drop("shape_geom", "stop_geom", "first_dist", "last_dist", "need_flip")
-        )
-
-        # Separate trips that have bad distances and fix them
-        bad_trips = (
-            stop_times.with_columns(
-                step=(pl.col("dist") - pl.col("dist").shift(1)).over("trip_id"),
-                overrun=(pl.col("dist") > (pl.col("shape_length") + pl.lit(100.0))),
-            )
-            .with_columns(
-                has_bad_step=(pl.col("step") < 0) & pl.col("dist").is_not_null(),
-                has_overrun=pl.col("overrun").any().over("trip_id"),
-            )
-            .filter(pl.col("has_bad_step") | pl.col("has_overrun"))
-            .select("trip_id")
-            .unique()
-        )
-        trip_id = "CNS2014-CNS_MUL-Weekday-00-4180831"
-        print(trip_id in bad_trips.collect()["trip_id"].to_list())
-
-        def compute_dist(g: pl.DataFrame) -> pl.DataFrame:
-            D = g["shape_length"][0]
-            dists0 = g["dist"].to_list()
-
-            # No geometry length or single stop → trivial
-            if np.isnan(D) or len(dists0) <= 1:
-                return g
-
-            times = g["dtime"].to_numpy()
-            dists = np.array([0.0] + dists0[1:-1] + [float(D)], dtype=float)
-            ix = hp.longest_subsequence(dists, index=True)
-            good_dists = np.take(dists, ix)
-            good_times = np.take(times, ix)
-            new_dists = np.interp(times, good_times, good_dists).astype(float)
-
-            if g["trip_id"][0] == trip_id:
-                print(times) 
-                print(good_times) 
-                print(good_dists)
-            return g.with_columns(dist=pl.Series(new_dists))
-
-        fixed = (
-            stop_times.join(bad_trips, on="trip_id", how="inner")
-            .sort("trip_id", "stop_sequence")
-            .group_by("trip_id")
-            .map_groups(compute_dist, schema=stop_times.collect_schema())
-        )
-
-        good = stop_times.join(bad_trips, on="trip_id", how="anti")
-
-        # Assemble stop times
-        stop_times = (
-            pl.concat([good, fixed])
-            .with_columns(
-                shape_dist_traveled=pl.when(pl.col("dist").is_not_null())
-                .then(convert(pl.col("dist")))
-                .otherwise(None)
-            )
-            .sort("trip_id", "stop_sequence")
-            .select(final_cols)
-        )
-
-        new_feed = feed.copy()
-        new_feed.stop_times = stop_times
-        return new_feed
-
-    return (append_dist_to_stop_times,)
+def _(dates, feed):
+    feed.compute_route_time_series(dates).collect()
+    return
 
 
 @app.cell
@@ -387,7 +254,7 @@ def _(dates, feed, trip_stats):
 @app.cell
 def _():
     # feed = gk.read_feed(DOWN / "gtfs_brevibus.zip", dist_units="km")
-    # routes = feed.get_routes(as_gdf=True)
+    # routes = feed.get_routes(as_geo=True)
     # print(routes)
     # feed = feed.aggregate_routes()
     # feed.map_routes(feed.routes["route_id"])

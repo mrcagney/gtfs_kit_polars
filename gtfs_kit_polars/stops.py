@@ -95,7 +95,7 @@ def get_stops(
     to stops visited by those routes.
     If ``in_stations``, then subset further stops in stations if station data
     is available.
-    If ``as_gdf``, then return the result as a GeoDataFrame with a 'geometry'
+    If ``as_geo``, then return the result as a GeoDataFrame with a 'geometry'
     column of points instead of 'stop_lat' and 'stop_lon' columns.
     The GeoDataFrame will have a UTM CRS if ``use_utm`` and a WGS84 CRS otherwise.
     """
