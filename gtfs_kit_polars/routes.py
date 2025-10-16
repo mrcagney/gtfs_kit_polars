@@ -336,7 +336,7 @@ def compute_route_stats_0(
     direction ID values present
     """
     # Coerce trip stats to LazyFrame
-    f = trip_stats if isinstance(trip_stats, pl.LazyFrame) else trip_stats.lazy()
+    f = hp.make_lazy(trip_stats)
 
     # Handle defunct case
     schema = {
@@ -612,10 +612,11 @@ def compute_route_stats(
     if not dates:
         return null_stats
 
-    if trip_stats is None:
-        trip_stats = feed.compute_trip_stats()
-    elif isinstance(trip_stats, pl.DataFrame):
-        trip_stats = trip_stats.lazy()
+    trip_stats = (
+        hp.make_lazy(trip_stats)
+        if trip_stats is not None
+        else feed.compute_trip_stats()
+    )
 
     # Collect stats for each date,
     # memoizing stats the sequence of trip IDs active on the date
@@ -639,9 +640,8 @@ def compute_route_stats(
             stats = stats_by_ids[ids].with_columns(date=pl.lit(date))
         elif ids:
             # Compute stats afresh
-            t = trip_stats.filter(pl.col("trip_id").is_in(ids))
             stats = compute_route_stats_0(
-                t,
+                trip_stats.filter(pl.col("trip_id").is_in(ids)),
                 split_directions=split_directions,
                 headway_start_time=headway_start_time,
                 headway_end_time=headway_end_time,

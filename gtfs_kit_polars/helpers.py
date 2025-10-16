@@ -57,6 +57,13 @@ def is_empty(f: pl.DataFrame | pl.LazyDataFrame) -> bool:
         return f.limit(1).collect().is_empty()
 
 
+def height(f: pl.DataFrame | pl.LazyDataFrame) -> int:
+    try:
+        return f.height
+    except AttributeError:
+        return f.select(pl.len()).collect().item()
+
+
 def get_srid(g: pl.DataFrame | pl.LazyFrame) -> int:
     """
     Table version of the Polars ST function ``srid``.

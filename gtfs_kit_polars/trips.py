@@ -629,13 +629,13 @@ def map_trips(
     color_palette: list[str] = cs.COLORS_SET2,
     *,
     show_stops: bool = False,
-    show_direction: bool = False,
+    show_direction: bool = True,
 ):
     """
-    Return a Folium map showing the given trips and (optionally)
-    their stops.
-    If any of the given trip IDs are not found in the feed, then raise a ValueError.
-    If ``include_direction``, then use the Folium plugin PolyLineTextPath to draw arrows
+    Return a Folium map showing the given trips.
+    Silently drop invalid trip IDs given.
+    If ``show_stops``, then plot the trip stops too.
+    If ``show_direction``, then use the Folium plugin PolyLineTextPath to draw arrows
     on each trip polyline indicating its direction of travel; this fails to work in some
     browsers, such as Brave 0.68.132.
     """
