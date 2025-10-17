@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import polars as pl
 import numpy as np
 import pandas as pd
+import polars as pl
 
 from . import constants as cs
 from . import helpers as hp
@@ -41,16 +41,11 @@ def clean_ids(feed: "Feed") -> "Feed":
         f = getattr(feed, table)
         if f is None:
             continue
-        for column in d:
-            if column in f.columns and column.endswith("_id"):
-                try:
-                    f[column] = (
-                        f[column].str.strip().str.replace(r"\s+", "_", regex=True)
-                    )
-                    setattr(feed, table, f)
-                except AttributeError:
-                    # Column is not of string type
-                    continue
+        names = f.collect_schema().names()
+        for col in d:
+            if col in names and d[col] == pl.Utf8 and col.endswith("_id"):
+                f = f.with_columns(pl.col(col).str.strip_chars().str.replace_all(r"\s+", "_").alias(col))
+                setattr(feed, table, f)
 
     return feed
 
@@ -70,10 +65,13 @@ def extend_id(feed: "Feed", id_col: str, extension: str, *, prefix=True) -> "Fee
     for table, d in cs.DTYPES.items():
         t = getattr(feed, table)
         if t is not None and id_col in d:
-            if d[id_col] != "string":
+            if d[id_col] != pl.Utf8:
                 raise ValueError(f"{id_col} must be a string column")
+            elif prefix:
+                t = t.with_columns((pl.lit(extension) + pl.col(id_col)).alias(id_col))
+                setattr(feed, table, t)
             else:
-                t[id_col] = extension + t[id_col] if prefix else t[id_col] + extension
+                t = t.with_columns((pl.col(id_col) + pl.lit(extension)).alias(id_col))
                 setattr(feed, table, t)
 
     return feed
@@ -85,96 +83,39 @@ def clean_times(feed: "Feed") -> "Feed":
     strings to make sorting by time work as expected.
     Return the resulting Feed.
     """
-
-    def reformat(t):
-        if pd.isna(t):
-            return t
-        t = t.strip()
-        if len(t) == 7:
-            t = "0" + t
-        return t
-
     feed = feed.copy()
+
     tables_and_columns = [
         ("stop_times", ["arrival_time", "departure_time"]),
         ("frequencies", ["start_time", "end_time"]),
     ]
+
     for table, columns in tables_and_columns:
         f = getattr(feed, table)
-        if f is not None:
-            f[columns] = f[columns].map(reformat)
+        if f is None:
+            continue
+
+        updates = []
+        for col in columns:
+            # strip, then if length == 7 (e.g. "7:00:00") pad to "07:00:00"
+            s = pl.col(col)
+            stripped = s.str.strip_chars()
+            updates.append(
+                pl.when(s.is_null())
+                .then(None)
+                .otherwise(
+                    pl.when(s.str.len_chars() == 7)
+                    .then(pl.lit("0") + stripped)
+                    .otherwise(stripped)
+                )
+                .alias(col)
+            )
+        if updates:
+            f = f.with_columns(updates)
+
         setattr(feed, table, f)
 
     return feed
-
-
-def drop_zombies(feed: "Feed") -> "Feed":
-    """
-    In the given Feed, do the following in order and return the resulting Feed.
-
-    1. Drop agencies with no routes.
-    2. Drop stops of location type 0 or NaN with no stop times.
-    3. Remove undefined parent stations from the ``parent_station`` column.
-    4. Drop trips with no stop times.
-    5. Drop shapes with no trips.
-    6. Drop routes with no trips.
-    7. Drop services with no trips.
-
-    """
-    feed = feed.copy()
-
-    # Drop agencies with no routes
-    f = feed.agency
-    feed.agency = f[f["agency_id"].isin(feed.routes["agency_id"].unique())].reset_index(
-        drop=True
-    )
-
-    # Drop stops of location type 0 or NaN with no stop times.
-    f = feed.stops
-    ids = feed.stop_times["stop_id"].unique()
-    cond = f.stop_id.isin(ids)
-    if "location_type" in f.columns:
-        cond |= ~f.location_type.isin([0, np.nan])
-    feed.stops = f[cond].reset_index(drop=True)
-
-    # Remove undefined parent stations from the ``parent_station`` column
-    if "parent_station" in feed.stops.columns:
-        f = feed.stops.copy()
-        ids = f["stop_id"].unique()
-        f["parent_station"] = f["parent_station"].map(
-            lambda x: x if x in ids else np.nan
-        )
-        feed.stops = f
-
-    # Drop trips with no stop times
-    f = feed.trips
-    ids = feed.stop_times["trip_id"].unique()
-    feed.trips = f[f["trip_id"].isin(ids)].reset_index(drop=True)
-
-    # Drop shapes with no trips
-    f = feed.shapes
-    if f is not None:
-        feed.shapes = f[
-            f["shape_id"].isin(feed.trips["shape_id"].unique())
-        ].reset_index(drop=True)
-
-    # Drop routes with no trips
-    f = feed.routes
-    feed.routes = f[f["route_id"].isin(feed.trips["route_id"].unique())].reset_index(
-        drop=True
-    )
-
-    # Drop services with no trips
-    ids = feed.trips["service_id"].unique()
-    if feed.calendar is not None:
-        f = feed.calendar
-        feed.calendar = f[f["service_id"].isin(ids)].reset_index(drop=True)
-    if feed.calendar_dates is not None:
-        f = feed.calendar_dates
-        feed.calendar_dates = f[f["service_id"].isin(ids)].reset_index(drop=True)
-
-    return feed
-
 
 def clean_route_short_names(feed: "Feed") -> "Feed":
     """
@@ -189,26 +130,102 @@ def clean_route_short_names(feed: "Feed") -> "Feed":
     if r is None:
         return feed
 
-    # Fill NaNs and strip whitespace
-    r["route_short_name"] = r["route_short_name"].fillna("n/a").str.strip()
+    # Normalize short names: fill nulls with "n/a" and strip whitespace
+    r = r.with_columns(
+        route_short_name=(
+            pl.when(pl.col("route_short_name").is_null())
+            .then(pl.lit("n/a"))
+            .otherwise(pl.col("route_short_name"))
+            .str.strip_chars()
+        )
+    )
 
-    # Disambiguate
-    def disambiguate(row):
-        rsn, rid = row
-        return rsn + "-" + rid
-
-    r["dup"] = r["route_short_name"].duplicated(keep=False)
-    r.loc[r["dup"], "route_short_name"] = r.loc[
-        r["dup"], ["route_short_name", "route_id"]
-    ].apply(disambiguate, axis=1)
-    del r["dup"]
-
+    # Mark duplicates and disambiguate by appending "-<route_id>"
+    r = (
+        r
+        .with_columns(
+            dup=(pl.len().over("route_short_name") > 1)
+        )
+        .with_columns(
+            route_short_name=(
+                pl.when(pl.col("dup"))
+                .then(pl.col("route_short_name") + pl.lit("-") + pl.col("route_id"))
+                .otherwise(pl.col("route_short_name"))
+            )
+        )
+        .drop("dup")
+    )
     feed.routes = r
     return feed
 
+def drop_zombies(feed: "Feed") -> "Feed":
+    """
+    In the given Feed, do the following in order and return the resulting Feed.
+
+    1. Drop agencies with no routes.
+    2. Drop stops of location type 0 or None with no stop times.
+    3. Remove undefined parent stations from the ``parent_station`` column.
+    4. Drop trips with no stop times.
+    5. Drop shapes with no trips.
+    6. Drop routes with no trips.
+    7. Drop services with no trips.
+
+    """
+    feed = feed.copy()
+
+    # 1) Agencies with routes only
+    if feed.agency is not None:
+        r_ag = feed.routes.select("agency_id").unique()
+        feed.agency = feed.agency.join(r_ag, on="agency_id", how="inner")
+
+    # 2) Drop stops of location_type 0/None that have no stop_times
+    st_stop_ids = feed.stop_times.select("stop_id").unique().collect()["stop_id"].to_list()
+    base_keep = pl.col("stop_id").is_in(st_stop_ids)
+    if "location_type" in feed.stops.collect_schema().names():
+        keep = base_keep | ~pl.col("location_type").is_in([0, None])
+    else:
+        keep = base_keep
+    feed.stops = feed.stops.filter(keep)
+
+    # 3) Clean undefined parent_station → null
+    if "parent_station" in feed.stops.collect_schema().names():
+        stop_ids_for_parent = feed.stops.select("stop_id").unique().collect()["stop_id"].to_list()
+        feed.stops = feed.stops.with_columns(
+            parent_station=pl.when(
+                pl.col("parent_station").is_in(stop_ids_for_parent)
+            )
+            .then(pl.col("parent_station"))
+            .otherwise(None)
+        )
+
+    # 4) Keep only trips that appear in stop_times
+    st_trip_ids = feed.stop_times.select("trip_id").unique()
+    feed.trips = feed.trips.join(st_trip_ids, on="trip_id", how="inner")
+
+    # 5) Keep only shapes that appear in trips
+    if feed.shapes is not None:
+        trip_shape_ids = feed.trips.select("shape_id").unique()
+        feed.shapes = feed.shapes.join(trip_shape_ids, on="shape_id", how="inner")
+
+    # 6) Keep only routes that appear in trips
+    trip_route_ids = feed.trips.select("route_id").unique()
+    feed.routes = feed.routes.join(trip_route_ids, on="route_id", how="inner")
+
+    # 7) Keep only services that appear in trips
+    service_ids = feed.trips.select("service_id").unique()
+    if feed.calendar is not None:
+        feed.calendar = feed.calendar.join(service_ids, on="service_id", how="inner")
+    if feed.calendar_dates is not None:
+        feed.calendar_dates = feed.calendar_dates.join(
+            service_ids, on="service_id", how="inner"
+        )
+
+    return feed
+
+
 
 def build_aggregate_routes_dict(
-    routes: pd.DataFrame, by: str = "route_short_name", route_id_prefix: str = "route_"
+    routes: pl.DataFrame | pl.LazyFrame, by: str = "route_short_name", route_id_prefix: str = "route_"
 ) -> dict[str, str]:
     """
     Given a DataFrame of routes, group the routes by route short name, say,
@@ -220,21 +237,63 @@ def build_aggregate_routes_dict(
     one new route ID for all the old route IDs in that group based on the given
     ``route_id_prefix`` string and a running count, e.g. ``'route_013'``.
     """
+    routes = hp.make_lazy(routes).collect()
     if by not in routes.columns:
         raise ValueError(f"Column {by} not in routes.")
 
     # Create new route IDs
-    n = routes.groupby(by).ngroups
+    n = routes.select(by).n_unique()
     nids = hp.make_ids(n, route_id_prefix)
     nid_by_oid = dict()
     i = 0
-    for col, group in routes.groupby(by):
-        d = {oid: nids[i] for oid in group.route_id.values}
+    for group in routes.partition_by(by):
+        d = {oid: nids[i] for oid in group["route_id"].to_list()}
         nid_by_oid.update(d)
         i += 1
 
     return nid_by_oid
 
+def build_aggregate_routes_table(
+    routes: pl.DataFrame | pl.LazyFrame,
+    by: str = "route_short_name",
+    route_id_prefix: str = "route_",
+) -> pl.LazyFrame:
+    """
+    Group routes by the ``by`` column and assign one new route ID per group
+    using the given prefix. Return a table with columns
+
+    - ``route_id``
+    - ``new_route_id``
+
+    """
+    routes = hp.make_lazy(routes)
+    schema = routes.collect_schema().names()
+    if by not in schema:
+        raise ValueError(f"Column {by} not in routes.")
+    if "route_id" not in schema:
+        raise ValueError("Column 'route_id' not in routes.")
+
+    # Distinct groups (small), deterministically ordered
+    groups = (
+        routes
+        .select(pl.col(by))
+        .unique()
+        .collect()
+    )
+
+    # One new id per group (uses your helper for padding/format)
+    group_map = pl.LazyFrame({by: groups[by], "new_route_id": hp.make_ids(groups.height, route_id_prefix)})
+
+    # Join back to get old->new mapping, then drop dups
+    return (
+        routes
+        .join(group_map, on=by, how="left")
+        .select(
+            "route_id",
+            "new_route_id",
+        )
+        .unique()
+    )
 
 def aggregate_routes(
     feed: "Feed", by: str = "route_short_name", route_id_prefix: str = "route_"

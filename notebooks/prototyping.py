@@ -55,16 +55,20 @@ def _(feed):
 
 
 @app.cell
-def _(dates, feed, gk):
-    ts = feed.compute_network_time_series(dates, num_minutes=60).collect()
-    gk.downsample(ts, num_minutes=3*60).collect()
-    return (ts,)
+def _(feed):
+    feed.routes.collect()
+    return
+
+
+@app.cell
+def _(feed, gk):
+    gk.build_aggregate_routes_table(feed.routes).collect()
+    return
 
 
 @app.cell
 def _():
     #ts = feed.compute_route_time_series(dates, num_minutes=60).collect()
-
     return
 
 
