@@ -32,17 +32,17 @@ def _():
     warnings.filterwarnings("ignore")
 
     DATA = pb.Path("data")
-    return List, gk, pb, pl, sg
+    return DATA, List, gk, pl, sg
 
 
 @app.cell
-def _(gk, pb):
+def _(DATA, gk):
     # akl_url = "https://gtfs.at.govt.nz/gtfs.zip"
     # feed = gk.read_feed(akl_url, dist_units="km")
-    feed = gk.read_feed(
-        pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km"
-    )
-    # feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
+    # feed = gk.read_feed(
+    #     pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km"
+    # )
+    feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
     return (feed,)
 
 
@@ -55,8 +55,16 @@ def _(feed):
 
 
 @app.cell
-def _(feed):
-    '1659-69c424c4' in feed.stops.collect()["stop_id"]
+def _(dates, feed, gk):
+    ts = feed.compute_network_time_series(dates, num_minutes=60).collect()
+    gk.downsample(ts, num_minutes=3*60).collect()
+    return (ts,)
+
+
+@app.cell
+def _():
+    #ts = feed.compute_route_time_series(dates, num_minutes=60).collect()
+
     return
 
 

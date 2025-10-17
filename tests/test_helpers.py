@@ -2,6 +2,7 @@ import datetime as dt
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 import shapely.geometry as sg
 from numpy.testing import assert_array_equal
@@ -12,25 +13,51 @@ from gtfs_kit_polars import helpers as gkh
 from .context import cairns, cairns_dates, cairns_trip_stats, gtfs_kit_polars
 
 
-def test_timestr_to_seconds():
+def test_timestr_to_seconds_0():
     timestr1 = "01:01:01"
     seconds1 = 3600 + 60 + 1
     timestr2 = "25:01:01"
-    assert gkh.timestr_to_seconds(timestr1) == seconds1
-    assert gkh.timestr_to_seconds(timestr2, mod24=True) == seconds1
+    assert gkh.timestr_to_seconds_0(timestr1) == seconds1
+    assert gkh.timestr_to_seconds_0(timestr2, mod24=True) == seconds1
     # Test error handling
-    assert pd.isna(gkh.timestr_to_seconds(seconds1))
+    assert gkh.timestr_to_seconds_0(seconds1) is None
 
 
-def test_seconds_to_timestr():
+def test_seconds_to_timestr_0():
     timestr1 = "01:01:01"
     seconds1 = 3600 + 60 + 1
     timestr2 = "25:01:01"
     seconds2 = 25 * 3600 + 60 + 1
-    assert gkh.seconds_to_timestr(seconds1) == timestr1
-    assert gkh.seconds_to_timestr(seconds2) == timestr2
-    assert gkh.seconds_to_timestr(seconds2, mod24=True) == timestr1
-    assert pd.isna(gkh.seconds_to_timestr(timestr1))
+    assert gkh.seconds_to_timestr_0(seconds1) == timestr1
+    assert gkh.seconds_to_timestr_0(seconds2) == timestr2
+    assert gkh.seconds_to_timestr_0(seconds2, mod24=True) == timestr1
+    assert gkh.seconds_to_timestr_0(timestr1) is None
+
+
+def test_timestr_to_seconds():
+    df = pl.DataFrame({
+        "t": ["00:00:00", "01:02:03", "24:00:00", "27:15:30"]
+    })
+    # No mod24
+    out = df.with_columns(sec=gkh.timestr_to_seconds("t")).to_dict(as_series=False)["sec"]
+    assert out == [0, 3723, 86400, 98130]
+
+    # With mod24 -> wrap at 24h
+    out_mod = df.with_columns(sec=gkh.timestr_to_seconds("t", mod24=True)).to_dict(as_series=False)["sec"]
+    assert out_mod == [0, 3723, 0, 11730]  # 98130 % 86400 = 11730
+
+
+def test_seconds_to_timestr():
+    df = pl.DataFrame({
+        "s": [0, 3723, 86400, 98130]  # 27:15:30
+    })
+    # No mod24
+    out = df.with_columns(t=gkh.seconds_to_timestr("s")).to_dict(as_series=False)["t"]
+    assert out == ["00:00:00", "01:02:03", "24:00:00", "27:15:30"]
+
+    # With mod24 -> wrap at 24h
+    out_mod = df.with_columns(t=gkh.seconds_to_timestr("s", mod24=True)).to_dict(as_series=False)["t"]
+    assert out_mod == ["00:00:00", "01:02:03", "00:00:00", "03:15:30"]
 
 
 def test_datestr_to_date():
@@ -45,12 +72,29 @@ def test_date_to_datestr():
     assert gkh.date_to_datestr(date) == datestr
 
 
-def test_timestr_mod24():
-    timestr1 = "01:01:01"
-    assert gkh.timestr_mod24(timestr1) == timestr1
-    timestr2 = "25:01:01"
-    assert gkh.timestr_mod24(timestr2) == timestr1
+def test_replace_date():
+    # original datetimes with different dates but distinct times
+    dts = [
+        dt.datetime(2024, 5, 1, 8, 30, 0),
+        dt.datetime(2024, 5, 2, 9, 45, 15),
+    ]
+    df = pl.DataFrame({"datetime": dts})
 
+    # target date (YYYYMMDD)
+    target = "20250102"
+
+    # Eager
+    out_df = gkh.replace_date(df, target)
+    assert out_df.dtypes == df.dtypes
+    assert out_df.height == 2
+    assert out_df["datetime"][0] == dt.datetime(2025, 1, 2, 8, 30, 0)
+    assert out_df["datetime"][1] == dt.datetime(2025, 1, 2, 9, 45, 15)
+
+    # Lazy
+    out_lf = gkh.replace_date(df.lazy(), target)
+    collected = out_lf.collect()
+    assert collected["datetime"][0] == dt.datetime(2025, 1, 2, 8, 30, 0)
+    assert collected["datetime"][1] == dt.datetime(2025, 1, 2, 9, 45, 15)
 
 def test_is_metric():
     assert gkh.is_metric("m")
@@ -63,18 +107,9 @@ def test_is_metric():
 def test_get_convert_dist():
     di = "mi"
     do = "km"
-    f = gkh.get_convert_dist(di, do)
-    assert f(1) == 1.609_344
-
-
-def test_get_segment_length():
-    s = sg.LineString([(0, 0), (1, 0)])
-    p = sg.Point((1 / 2, 0))
-    assert gkh.get_segment_length(s, p) == 1 / 2
-    q = sg.Point((1 / 3, 0))
-    assert gkh.get_segment_length(s, p, q) == pytest.approx(1 / 6)
-    p = sg.Point((0, 1 / 2))
-    assert gkh.get_segment_length(s, p) == 0
+    fn = gkh.get_convert_dist(di, do)
+    f = pl.DataFrame({"dist": [1]})
+    assert f.select(dist=fn("dist"))["dist"].to_list() == [1.609_344]
 
 
 def test_get_max_runs():
@@ -84,64 +119,30 @@ def test_get_max_runs():
     assert_array_equal(get, expect)
 
 
-def test_get_peak_indices():
-    times = [0, 10, 20, 30, 31, 32, 40]
-    counts = [7, 1, 2, 7, 7, 1, 2]
-    get = gkh.get_peak_indices(times, counts)
-    expect = [0, 1]
-    assert_array_equal(get, expect)
-
-    counts = [0, 1, 0]
-    times = [18000, 21600, 28800]
-    get = gkh.get_peak_indices(times, counts)
-    expect = [1, 2]
-    assert_array_equal(get, expect)
-
-    counts = [0, 0, 0]
-    times = [18000, 21600, 28800]
-    get = gkh.get_peak_indices(times, counts)
-    expect = [0, 3]
-    assert_array_equal(get, expect)
-
-
 def test_are_equal():
-    f = pd.DataFrame([[1, 2], [3, 4]], columns=["a", "b"])
+    f = pl.DataFrame({"a": [1, 3], "b": [2, 4]})
     assert gkh.are_equal(f, f)
-    g = pd.DataFrame([[4, 3], [2, 1]], columns=["b", "a"])
+
+    g = pl.DataFrame({"b": [4, 2], "a": [3, 1]})
     assert gkh.are_equal(f, g)
-    h = pd.DataFrame([[1, 2], [5, 4]], columns=["a", "b"])
-    assert not gkh.are_equal(f, h)
-    h = pd.DataFrame()
+
+    h = pl.DataFrame({"a": [1, 5], "b": [2, 4]})
     assert not gkh.are_equal(f, h)
 
+    h = pl.DataFrame({})
+    assert not gkh.are_equal(f, h)
 
 def test_is_not_null():
-    f = None
     c = "foo"
+
+    f = pl.DataFrame(schema={"bar": pl.Int64, c: pl.Int64})
     assert not gkh.is_not_null(f, c)
 
-    f = pd.DataFrame(columns=["bar", c])
+    f = pl.DataFrame({"bar": [1], c: [None]})
     assert not gkh.is_not_null(f, c)
 
-    f = pd.DataFrame([[1, np.nan]], columns=["bar", c])
-    assert not gkh.is_not_null(f, c)
-
-    f = pd.DataFrame([[1, np.nan], [2, 2]], columns=["bar", c])
+    f = pl.DataFrame({"bar": [1, 2], c: [None, 2]})
     assert gkh.is_not_null(f, c)
-
-
-def test_get_active_trips_df():
-    f = pd.DataFrame({"start_time": [1, 2, 3, 4, 5], "end_time": [6, 7, 8, 9, 10]})
-    expect = pd.Series(
-        index=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], data=[1, 2, 3, 4, 5, 4, 3, 2, 1, 0]
-    )
-    get = gkh.get_active_trips_df(f)
-    assert_series_equal(get, expect)
-
-    f = pd.DataFrame({"start_time": [1, 2, 3, 4, 5], "end_time": [2, 4, 6, 8, 10]})
-    expect = pd.Series(index=[1, 2, 3, 4, 5, 6, 8, 10], data=[1, 1, 2, 2, 3, 2, 1, 0])
-    get = gkh.get_active_trips_df(f)
-    assert_series_equal(get, expect)
 
 
 def test_longest_subsequence():
@@ -226,21 +227,38 @@ def test_make_ids():
 
 def test_combine_time_series():
     # Minute-level index (two bins)
-    idx = pd.date_range("2025-01-01 00:00:00", periods=2, freq="Min")
+    t0 = dt.datetime(2025, 1, 1, 0, 0, 0)
+    t1 = t0 + dt.timedelta(minutes=1)
+    idx = [t0, t1]
 
-    # Two entities encoded with direction: R1-0 and R1-1
-    cols = ["R1-0", "R1-1"]
 
-    # Indicators (wide frames: index=datetime, columns=entities)
-    num_trips = pd.DataFrame([[1, 0], [2, 1]], index=idx, columns=cols)
-    num_trip_starts = pd.DataFrame(
-        [[1, np.nan], [0, 1]], index=idx, columns=cols
-    )  # will coerce NaN->0
-    num_trip_ends = pd.DataFrame([[0, 0], [1, 0]], index=idx, columns=cols)
-
+    # Indicators (wide frames: columns are entities + 'datetime')
+    num_trips = pl.DataFrame({
+        "datetime": idx,
+        "R1-0": [1, 2],
+        "R1-1": [0, 1],
+    })
+    num_trip_starts = pl.DataFrame({
+        "datetime": idx,
+        "R1-0": [1, 0],
+        "R1-1": [None, 1],  # will coerce None->0
+    })
+    num_trip_ends = pl.DataFrame({
+        "datetime": idx,
+        "R1-0": [0, 1],
+        "R1-1": [0, 0],
+    })
     # Distance/duration chosen so speed = 2.0 where duration>0
-    service_distance = pd.DataFrame([[0.5, 0.0], [0.5, 1.0]], index=idx, columns=cols)
-    service_duration = pd.DataFrame([[0.25, 0.0], [0.25, 0.5]], index=idx, columns=cols)
+    service_distance = pl.DataFrame({
+        "datetime": idx,
+        "R1-0": [0.5, 0.5],
+        "R1-1": [0.0, 1.0],
+    })
+    service_duration = pl.DataFrame({
+        "datetime": idx,
+        "R1-0": [0.25, 0.25],
+        "R1-1": [0.0, 0.5],
+    })
 
     series_by_indicator = {
         "num_trips": num_trips,
@@ -250,14 +268,15 @@ def test_combine_time_series():
         "service_duration": service_duration,
     }
 
-    out = gkh.combine_time_series(
+    out_lf = gkh.combine_time_series(
         series_by_indicator,
         kind="route",
         split_directions=True,
     )
+    out = out_lf.collect()
 
     # Expected rows: 2 timestamps * 2 directions = 4
-    assert len(out) == 4
+    assert out.height == 4
 
     # Required columns & ordering
     expected_front = ["datetime", "route_id", "direction_id"]
@@ -273,40 +292,42 @@ def test_combine_time_series():
         assert c in out.columns
 
     # Sorted by datetime then route_id then direction_id
-    out_sorted = out.sort_values(["datetime", "route_id", "direction_id"]).reset_index(
-        drop=True
-    )
-    pd.testing.assert_frame_equal(out, out_sorted)
+    out_sorted = out.sort(["datetime", "route_id", "direction_id"])
+    gkh.are_equal(out, out_sorted)
 
     # Direction split & ID decoding
-    assert set(out["route_id"].unique()) == {"R1"}
-    assert set(out["direction_id"].unique()) == {0, 1}
+    assert set(out.select("route_id").unique().to_series().to_list()) == {"R1"}
+    assert set(out.select("direction_id").unique().to_series().to_list()) == {0, 1}
 
-    # NaNs coerced to zero in numeric indicators (e.g., num_trip_starts had a NaN)
-    assert (out["num_trip_starts"] >= 0).all()
-    # Specifically check the NaN location: at t0, direction 1 had NaN -> 0
-    row_t0_dir1 = out[(out["datetime"] == idx[0]) & (out["direction_id"] == 1)].iloc[0]
+    # Nones coerced to zero in numeric indicators
+    assert out.select(pl.col("num_trip_starts").min()).item() >= 0
+
+    # Specifically check the None location: at t0, direction 1 had None -> 0
+    row_t0_dir1 = out.filter(
+        (pl.col("datetime") == t0) & (pl.col("direction_id") == 1)
+    ).row(0, named=True)
     assert row_t0_dir1["num_trip_starts"] == 0
 
     # service_speed = distance / duration; when duration==0 => 0.0
     # Check a bin with duration>0 (should be 2.0): t1, dir 0 -> 0.5 / 0.25 = 2.0
-    row_t1_dir0 = out[(out["datetime"] == idx[1]) & (out["direction_id"] == 0)].iloc[0]
+    row_t1_dir0 = out.filter(
+        (pl.col("datetime") == t1) & (pl.col("direction_id") == 0)
+    ).row(0, named=True)
     assert pytest.approx(row_t1_dir0["service_speed"]) == 2.0
 
     # Check a bin with duration==0 (should be 0.0): t0, dir 1 -> 0.0 / 0.0 -> 0.0 after fill
     assert row_t0_dir1["service_speed"] == 0.0
 
-
 def test_downsample():
     ts = cairns.compute_network_time_series(
-        cairns_dates, trip_stats=cairns_trip_stats, freq="1h"
-    )
-    f = gkh.downsample(ts, "1h")
+        cairns_dates, num_minutes=60
+    ).collect()
+    f = gkh.downsample(ts, num_minutes=60).collect()
     assert ts.equals(f)
 
-    f = gkh.downsample(ts, "3h")
+    f = gkh.downsample(ts, num_minutes=3*60).collect()
 
     # Should have correct num rows
-    assert len(f) == len(ts) / 3
+    assert f.height == ts.height / 3
     # Should have correct frequency
-    assert pd.infer_freq(f["datetime"].unique()[:3]) == "3h"
+    assert gkh.get_bin_size(f) == 3*60

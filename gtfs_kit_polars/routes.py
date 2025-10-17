@@ -828,7 +828,7 @@ def compute_route_time_series_0(
             cols[route] = series_by_route_by_indicator[ind][route]
         series_by_indicator[ind] = pl.LazyFrame(cols, strict=False)
 
-    # Combine & downsample via helpers and return a LazyFrame
+    # Combine & downsample
     return hp.combine_time_series(
         series_by_indicator, kind="route", split_directions=split_directions
     ).pipe(hp.downsample, num_minutes=num_minutes)
@@ -841,7 +841,7 @@ def compute_route_time_series(
     num_minutes: int = 60,
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
     Compute route stats in time series form at the given ``num_minutes`` frequency
     for the trips that lie in the trip stats subset,

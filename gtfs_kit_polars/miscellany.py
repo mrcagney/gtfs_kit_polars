@@ -681,7 +681,8 @@ def compute_network_time_series(
         group_cols.append("route_type")
 
     return (
-        rts.group_by(group_cols)
+        rts
+        .group_by(group_cols)
         .agg(**{c: pl.col(c).sum() for c in metrics})
         .with_columns(
             service_speed=(

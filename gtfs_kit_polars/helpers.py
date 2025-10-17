@@ -23,9 +23,41 @@ import utm
 from . import constants as cs
 
 
+# ------------------------------------
+# (Geo)DataFrame helpers
+# ------------------------------------
 def make_lazy(f: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
     return f if isinstance(f, pl.LazyFrame) else f.lazy()
 
+
+def is_empty(f: pl.DataFrame | pl.LazyDataFrame) -> bool:
+    try:
+        return f.is_empty()
+    except AttributeError:
+        return f.limit(1).collect().is_empty()
+
+
+def height(f: pl.DataFrame | pl.LazyDataFrame) -> int:
+    try:
+        return f.height
+    except AttributeError:
+        return f.select(pl.len()).collect().item()
+
+
+def is_not_null(f: pl.DataFrame | pl.LazyFrame, col_name: str) -> bool:
+    """
+    Return ``True`` if the given DataFrame has a column of the given
+    name (string), and there exists at least one non-NaN value in that
+    column; return ``False`` otherwise.
+    """
+    f = f.lazy() if isinstance(f, pl.DataFrame) else f
+    if (
+        col_name in f.collect_schema().names()
+        and f.select(pl.col(col_name).is_not_null().any()).collect().row(0)[0]
+    ):
+        return True
+    else:
+        return False
 
 def are_equal(f: pl.DataFrame | pl.LazyFrame, g: pl.DataFrame | pl.LazyFrame) -> bool:
     """
@@ -48,21 +80,6 @@ def are_equal(f: pl.DataFrame | pl.LazyFrame, g: pl.DataFrame | pl.LazyFrame) ->
     F = F.select(cols).sort(cols)
     G = G.select(cols).sort(cols)
     return F.equals(G, null_equal=True)
-
-
-def is_empty(f: pl.DataFrame | pl.LazyDataFrame) -> bool:
-    try:
-        return f.is_empty()
-    except AttributeError:
-        return f.limit(1).collect().is_empty()
-
-
-def height(f: pl.DataFrame | pl.LazyDataFrame) -> int:
-    try:
-        return f.height
-    except AttributeError:
-        return f.select(pl.len()).collect().item()
-
 
 def get_srid(g: pl.DataFrame | pl.LazyFrame) -> int:
     """
@@ -101,14 +118,15 @@ def to_srid(g: pl.DataFrame | pl.LazyFrame, srid: int) -> pl.DataFrame | pl.Lazy
     return g.with_columns(geometry=pl.col("geometry").st.to_srid(srid))
 
 
+# ------------------------------------
+# Other helpers
+# ------------------------------------
 def datestr_to_date(x: str | None, format_str: str = "%Y%m%d") -> dt.date | None:
     """
     Convert a date string to a datetime.date.
     Return ``None`` if ``x is None``.
     """
-    if x is None:
-        return None
-    return dt.datetime.strptime(x, format_str).date()
+    return dt.datetime.strptime(x, format_str).date() if x is not None else None
 
 
 def date_to_datestr(x: dt.date | None, format_str: str = "%Y%m%d") -> str | None:
@@ -116,12 +134,10 @@ def date_to_datestr(x: dt.date | None, format_str: str = "%Y%m%d") -> str | None
     Convert a datetime.date to a formatted string.
     Return ``None`` if ``x is None``.
     """
-    if x is None:
-        return None
-    return x.strftime(format_str)
+    return x.strftime(format_str) if x is not None else None
 
 
-def timestr_to_seconds_0(x: str, *, mod24: bool = False) -> int | np.nan:
+def timestr_to_seconds_0(x: str, *, mod24: bool = False) -> int | None:
     """
     Given an HH:MM:SS time string ``x``, return the number of seconds
     past midnight that it represents.
@@ -136,15 +152,15 @@ def timestr_to_seconds_0(x: str, *, mod24: bool = False) -> int | np.nan:
         if mod24:
             result %= 24 * 3600
     except Exception:
-        result = np.nan
+        result = None
     return result
 
 
-def seconds_to_timestr_0(x: int, *, mod24: bool = False) -> str | np.nan:
+def seconds_to_timestr_0(x: int, *, mod24: bool = False) -> str | None:
     """
     The inverse of :func:`timestr_to_seconds`.
     If ``mod24``, then first take the number of seconds modulo ``24*3600``.
-    Return NAN in case of bad inputs.
+    Return ``None`` in case of bad inputs.
     """
     try:
         seconds = int(x)
@@ -154,22 +170,7 @@ def seconds_to_timestr_0(x: int, *, mod24: bool = False) -> str | np.nan:
         mins, secs = divmod(remainder, 60)
         result = f"{hours:02d}:{mins:02d}:{secs:02d}"
     except Exception:
-        result = np.nan
-    return result
-
-
-def timestr_mod24_0(timestr: str) -> int | np.nan:
-    """
-    Given a GTFS HH:MM:SS time string, return a timestring in the same
-    format but with the hours taken modulo 24.
-    Return NAN in case of bad inputes
-    """
-    try:
-        hours, mins, secs = [int(x) for x in timestr.split(":")]
-        hours %= 24
-        result = f"{hours:02d}:{mins:02d}:{secs:02d}"
-    except Exception:
-        result = np.nan
+        result = None
     return result
 
 
@@ -198,25 +199,11 @@ def seconds_to_timestr(col: str, *, mod24: bool = False) -> pl.Expr:
     )
 
 
-def timestr_mod24(col: str) -> pl.Expr:
-    p = pl.col(col).str.split_exact(":", 3)
-    h = p.struct.field("field_0").cast(pl.Int64) % 24
-    m = p.struct.field("field_1").cast(pl.Int64)
-    s = p.struct.field("field_2").cast(pl.Int64)
-    return (
-        h.cast(pl.Utf8).str.zfill(2)
-        + pl.lit(":")
-        + m.cast(pl.Utf8).str.zfill(2)
-        + pl.lit(":")
-        + s.cast(pl.Utf8).str.zfill(2)
-    )
-
-
 def timestr_to_min(col: str) -> pl.Expr:
     return timestr_to_seconds(col, mod24=True) // 60
 
 
-def replace_date(f: pl.LazyFrame, date: str) -> pl.LazyFrame:
+def replace_date(f: pl.DataFrame|pl.LazyFrame, date: str) -> pl.DataFrame|pl.LazyFrame:
     """
     Given a table with a datetime object column called 'datetime' and given a
     YYYYMMDD date string, replace the datetime dates with the given date
@@ -231,27 +218,6 @@ def replace_date(f: pl.LazyFrame, date: str) -> pl.LazyFrame:
             seconds=pl.col("datetime").dt.second(),
         )
     )
-
-
-def get_segment_length(
-    linestring: sg.LineString, p: sg.Point, q: sg.Point | None = None
-) -> float:
-    """
-    Given a Shapely linestring and two Shapely points,
-    project the points onto the linestring, and return the distance
-    along the linestring between the two points.
-    If ``q is None``, then return the distance from the start of the
-    linestring to the projection of ``p``.
-    The distance is measured in the native coordinates of the linestring.
-    """
-    # Get projected distances
-    d_p = linestring.project(p)
-    if q is not None:
-        d_q = linestring.project(q)
-        d = abs(d_p - d_q)
-    else:
-        d = d_p
-    return d
 
 
 def get_max_runs(x) -> np.array:
@@ -280,45 +246,6 @@ def get_max_runs(x) -> np.array:
     run_starts = np.where(diffs > 0)[0]
     run_ends = np.where(diffs < 0)[0]
     return np.array([run_starts, run_ends]).T
-    # # Get lengths of runs and find index of longest
-    # idx = np.argmax(run_ends - run_starts)
-    # return run_starts[idx], run_ends[idx]
-
-
-def get_peak_indices(times: list, counts: list) -> np.array:
-    """
-    Given an increasing list of times as seconds past midnight and a
-    list of trip counts at those respective times,
-    return a pair of indices i, j such that times[i] to times[j] is
-    the first longest time period such that for all i <= x < j,
-    counts[x] is the max of counts.
-    Assume times and counts have the same nonzero length.
-
-    Examples::
-
-        >>> times = [0, 10, 20, 30, 31, 32, 40]
-        >>> counts = [7, 1, 2, 7, 7, 1, 2]
-        >>> get_peak_indices(times, counts)
-        array([0, 1])
-
-        >>> counts = [0, 0, 0]
-        >>> times = [18000, 21600, 28800]
-        >>> get_peak_indices(times, counts)
-        array([0, 3])
-
-    """
-    max_runs = get_max_runs(counts)
-
-    def get_duration(a):
-        return times[a[1]] - times[a[0]]
-
-    if len(max_runs) == 1:
-        result = max_runs[0]
-    else:
-        index = np.argmax(np.apply_along_axis(get_duration, 1, max_runs))
-        result = max_runs[index]
-
-    return result
 
 
 def is_metric(dist_units: str) -> bool:
@@ -360,52 +287,6 @@ def get_convert_dist(dist_units_in: str, dist_units_out: str):
     return builder
 
 
-def is_not_null(f: pl.DataFrame | pl.LazyFrame, col_name: str) -> bool:
-    """
-    Return ``True`` if the given DataFrame has a column of the given
-    name (string), and there exists at least one non-NaN value in that
-    column; return ``False`` otherwise.
-    """
-    f = f.lazy() if isinstance(f, pl.DataFrame) else f
-    if (
-        col_name in f.collect_schema().names()
-        and f.select(bingo=pl.col("shape_dist_traveled").is_not_null().any())
-        .collect()
-        .row(0)[0]
-    ):
-        return True
-    else:
-        return False
-
-
-def get_active_trips_df(trip_times: pd.DataFrame) -> pd.Series:
-    """
-    Count the number of trips in ``trip_times`` that are active
-    at any given time.
-
-    Assume ``trip_times`` contains the columns
-
-    - start_time: start time of the trip in seconds past midnight
-    - end_time: end time of the trip in seconds past midnight
-
-    Return a Series whose index is times from midnight when trips
-    start and end and whose values are the number of active trips for that time.
-    """
-    active_trips = (
-        pd.concat(
-            [
-                pd.Series(1, trip_times.start_time),  # departed add 1
-                pd.Series(-1, trip_times.end_time),  # arrived subtract 1
-            ]
-        )
-        .groupby(level=0, sort=True)
-        .sum()
-        .cumsum()
-        .ffill()
-    )
-    return active_trips
-
-
 def combine_time_series(
     series_by_indicator: dict[str, pl.DataFrame | pl.LazyFrame],
     *,
@@ -436,7 +317,7 @@ def combine_time_series(
     # Convert wide to long time series for each indicator
     long_frames = []
     for ind, f in series_by_indicator.items():
-        f = f if isinstance(f, pl.LazyFrame) else f.lazy()
+        f = make_lazy(f)
         value_cols = [c for c in f.collect_schema().names() if c != "datetime"]
         if not value_cols:
             continue
@@ -518,7 +399,8 @@ def get_bin_size(time_series: pl.LazyFrame) -> float:
     Return None if there's only one unique datetime present.
     """
     times = (
-        time_series.select("datetime")
+        make_lazy(time_series)
+        .select("datetime")
         .unique()
         .sort("datetime")
         .collect()["datetime"]
@@ -532,10 +414,10 @@ def downsample(
     time_series: pl.DataFrame | pl.LazyFrame, num_minutes: int
 ) -> pl.LazyFrame:
     """
-    Downsample the given route, stop, or feed time series,
+    Downsample the given route, stop, or network time series,
     (outputs of :func:`.routes.compute_route_time_series`,
     :func:`.stops.compute_stop_time_series`, or
-    :func:`.miscellany.compute_feed_time_series`,
+    :func:`.miscellany.compute_network_time_series`,
     respectively) to time bins of size ``num_minutes`` minutes.
 
     Return the given time series unchanged if it's empty or
@@ -545,9 +427,7 @@ def downsample(
     bin size of the given time series.
     """
     # Coerce to LazyFrame
-    time_series = (
-        time_series.lazy() if isinstance(time_series, pl.DataFrame) else time_series
-    )
+    time_series = make_lazy(time_series)
 
     # Handle defunct cases
     if is_empty(time_series):
@@ -585,7 +465,7 @@ def downsample(
             group_by=dims,
         ).agg(num_trips=pl.col("num_trips").sum())
     else:
-        # It's a route or feed time series
+        # It's a route or network time series
         metrics = [
             "num_trips",
             "num_trip_starts",
@@ -594,7 +474,17 @@ def downsample(
             "service_duration",
             "service_speed",
         ]
+
         dims = [c for c in cols if c not in (["datetime"] + metrics)]
+
+        if not dims:
+            # It's a network time series without column 'route_type'.
+            # Insert column 'tmp' to yield nonempty ``dims`` for calcs below.
+            is_network_series = True
+            time_series = time_series.with_columns(tmp=pl.lit(-1))
+            dims = ["tmp"]
+        else:
+            is_network_series = False
 
         # Sum across coarse timestamps and get last fine timestamp
         sums = (
@@ -639,6 +529,10 @@ def downsample(
             ).fill_null(0),
             datetime=pl.col("big"),
         )
+        if is_network_series:
+            # Clean up
+            dims.remove("tmp")
+            result = result.drop("tmp")
 
     return result.select(["datetime"] + dims + metrics).sort(["datetime"] + dims)
 
@@ -653,25 +547,9 @@ def make_html(d: dict) -> str:
     )
 
 
-def drop_feature_ids(collection: dict) -> dict:
-    """
-    Given a GeoJSON FeatureCollection, remove the ``'id'`` attribute of each
-    Feature, if it exists.
-    """
-    new_features = []
-    for f in collection["features"]:
-        new_f = copy.deepcopy(f)
-        if "id" in new_f:
-            del new_f["id"]
-        new_features.append(new_f)
-
-    collection["features"] = new_features
-    return collection
-
-
 def longest_subsequence(
     seq, mode="strictly", order="increasing", key=None, *, index=False
-):
+) -> list:
     """
     Return the longest increasing subsequence of `seq`.
 

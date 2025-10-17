@@ -29,7 +29,7 @@ Progress porting the Pandas original to Polars.
 [] cleaners.py
 [x] constants.py
 [x] feed.py
-[] helpers.py
+[x] helpers.py
 [] miscellany.py: in progress
 [x] routes.py
 [x] shapes.py
