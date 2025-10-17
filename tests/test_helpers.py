@@ -13,6 +13,20 @@ from gtfs_kit_polars import helpers as gkh
 from .context import cairns, cairns_dates, cairns_trip_stats, gtfs_kit_polars
 
 
+
+def test_are_equal():
+    f = pl.DataFrame({"a": [1, 3], "b": [2, 4]})
+    assert gkh.are_equal(f, f)
+
+    g = pl.DataFrame({"b": [4, 2], "a": [3, 1]})
+    assert gkh.are_equal(f, g)
+
+    h = pl.DataFrame({"a": [1, 5], "b": [2, 4]})
+    assert not gkh.are_equal(f, h)
+
+    h = pl.DataFrame({})
+    assert not gkh.are_equal(f, h)
+
 def test_timestr_to_seconds_0():
     timestr1 = "01:01:01"
     seconds1 = 3600 + 60 + 1
@@ -118,19 +132,6 @@ def test_get_max_runs():
     expect = np.array([[0, 1], [3, 5]])
     assert_array_equal(get, expect)
 
-
-def test_are_equal():
-    f = pl.DataFrame({"a": [1, 3], "b": [2, 4]})
-    assert gkh.are_equal(f, f)
-
-    g = pl.DataFrame({"b": [4, 2], "a": [3, 1]})
-    assert gkh.are_equal(f, g)
-
-    h = pl.DataFrame({"a": [1, 5], "b": [2, 4]})
-    assert not gkh.are_equal(f, h)
-
-    h = pl.DataFrame({})
-    assert not gkh.are_equal(f, h)
 
 def test_is_not_null():
     c = "foo"
