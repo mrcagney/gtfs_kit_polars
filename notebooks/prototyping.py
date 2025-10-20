@@ -21,7 +21,7 @@ def _():
     import pandas as pd
     import numpy as np
     import geopandas as gpd
-    import shapely
+    import shapely as sl
     import shapely.geometry as sg
     import shapely.ops as so
     import folium as fl
@@ -32,17 +32,17 @@ def _():
     warnings.filterwarnings("ignore")
 
     DATA = pb.Path("data")
-    return DATA, List, gk, pl, sg
+    return gk, pb, pl, st
 
 
 @app.cell
-def _(DATA, gk):
+def _(gk, pb):
     # akl_url = "https://gtfs.at.govt.nz/gtfs.zip"
     # feed = gk.read_feed(akl_url, dist_units="km")
-    # feed = gk.read_feed(
-    #     pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km"
-    # )
-    feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
+    feed = gk.read_feed(
+        pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km"
+    )
+    #feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
     return (feed,)
 
 
@@ -55,171 +55,57 @@ def _(feed):
 
 
 @app.cell
-def _(feed):
-    feed.routes.collect()
-    return
-
-
-@app.cell
-def _(feed, gk):
-    gk.build_aggregate_routes_table(feed.routes).collect()
-    return
-
-
-@app.cell
 def _():
-    #ts = feed.compute_route_time_series(dates, num_minutes=60).collect()
+    # ts = feed.compute_route_time_series(dates, num_minutes=60).collect()
     return
 
 
 @app.cell
-def _(append_dist_to_stop_times, feed, pl):
-    s = append_dist_to_stop_times(feed).stop_times.collect()
-    trip_id = "CNS2014-CNS_MUL-Weekday-00-4180831"
-    s.filter(pl.col("trip_id") == trip_id)
+def _(feed, gk, pl, st):
+    g = (
+        gk.split_simple_alt(feed.get_shapes(as_geo=True))
+        .collect()
+        .with_columns(is_simple=st.geom().st.is_simple())
+    )
+    g.filter(~pl.col("is_simple"))
     return
 
 
 @app.cell
-def _(List, Tuple, sg):
-    def split_simple_0(line: sg.LineString) -> list[sg.LineString]:
-        """
-        Greedily build maximal simple LineString components.
+def _(feed, gk, pl, st):
+    import pytest
 
-        Strategy:
-          - Try appending each next vertex.
-          - If the tentative component stays .is_simple -> keep growing.
-          - If it stops being simple:
-              * If the new vertex is a previously visited vertex in the current component,
-                emit the loop slice as its own component and restart from that vertex.
-              * Otherwise, flush the whole current component and restart from the last edge
-                (prev, next), so we don't drop the bridging segment.
+    shapes_g = gk.get_shapes(feed, as_geo=True, use_utm=True).with_columns(
+            length=st.geom().st.length(),
+            is_simple=st.geom().st.is_simple(),
+        ).collect()
+    # We should have some non-simple shapes to start with
+    assert not shapes_g["is_simple"].all()
 
-        Returns maximal simple components (no self-intersections).
-        """
-        coords = list(map(tuple, getattr(line, "coords", [])))  # type: List[Tuple[float, float]]
-        if len(coords) < 2:
-            return []
+    s = gk.split_simple(shapes_g).collect()
+    assert set(s.columns) == {
+        "shape_id",
+        "subshape_id",
+        "subshape_sequence",
+        "subshape_length_m",
+        "cum_length_m",
+        "geometry",
+    }
 
-        out: List[sg.LineString] = []
+    # All sublinestrings of result should be simple
+    assert s.with_columns(is_simple=st.geom().st.is_simple())["is_simple"].all()
 
-        current_pts: List[Tuple[float, float]] = [coords[0]]
-        first_idx: dict[Tuple[float, float], int] = {coords[0]: 0}
-
-        for i in range(1, len(coords)):
-            p_prev = current_pts[-1]
-            p_next = coords[i]
-
-            # Skip consecutive duplicates
-            if p_next == p_prev:
-                continue
-
-            # Try to extend greedily
-            tentative = current_pts + [p_next]
-            if sg.LineString(tentative).is_simple:
-                current_pts.append(p_next)
-                # record first visit to p_next if new
-                if p_next not in first_idx:
-                    first_idx[p_next] = len(current_pts) - 1
-                continue
-
-            # Not simple if we add p_next. Handle two cases:
-
-            # 1) Loop closing at a previously seen vertex: emit the loop slice
-            if p_next in first_idx:
-                j = first_idx[p_next]  # first occurrence of p_next in current
-                loop_pts = current_pts[j:] + [p_next]
-                if len(loop_pts) >= 2:
-                    out.append(sg.LineString(loop_pts))
-
-                # Restart a fresh component from that vertex for the tail
-                current_pts = [p_next]
-                first_idx = {p_next: 0}
-                continue
-
-            # 2) General non-adjacent self-intersection:
-            #    Flush current component, then start a new one from the bridging edge
-            if len(current_pts) >= 2:
-                out.append(sg.LineString(current_pts))
-            current_pts = [p_prev, p_next]
-            first_idx = {p_prev: 0, p_next: 1}
-
-        # Flush final component
-        if len(current_pts) >= 2:
-            out.append(sg.LineString(current_pts))
-
-        return out
+    # Check each shape group
+    for shape_id, group in s.partition_by("shape_id", as_dict=True).items():
+        shape_id = shape_id[0]
+        ss = shapes_g.filter(pl.col("shape_id") == shape_id)
+        # Each subshape should be shorter than shape
+        assert (group["subshape_length_m"] <= ss["length"].sum()).all()
+        # Cumulative length should equal shape length within 1%
+        L = ss["length"][0]
+        assert group["cum_length_m"].max() == pytest.approx(L, rel=0.001)
 
 
-    def test_split_simple_0():
-        # ---- Test 1: straight line, no repeats -> single component
-        line1 = sg.LineString([(0, 0), (1, 0), (2, 0)])
-        expected1 = [
-            [(0, 0), (1, 0), (2, 0)],
-        ]
-
-        # ---- Test 2: loop then tail (includes a consecutive duplicate that should be ignored)
-        line2 = sg.LineString([(0, 0), (1, 0), (1, 0), (1, 1), (0, 1), (0, 0), (0, 1)])
-        expected2 = [
-            [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)],  # closed loop
-            [(0, 0), (0, 1)],  # tail
-        ]
-
-        # ---- Test 3: doubles back on an interior vertex
-        line3 = sg.LineString([(0, 0), (2, 0), (2, 1), (1, 1), (1, 0), (2, 0), (3, 0)])
-        expected3 = [
-            [(0, 0), (2, 0), (2, 1), (1, 1), (1, 0), (2, 0)],
-            [(2, 0), (3, 0)],
-        ]
-
-        for name, line, expected in [
-            ("straight", line1, expected1),
-            ("loop_then_tail", line2, expected2),
-            ("double_back", line3, expected3),
-        ]:
-            parts = split_simple_0(line)
-
-            assert isinstance(parts, list), f"{name}: must return list"
-            assert len(parts) == len(expected), (
-                f"{name}: expected {len(expected)} components, got {len(parts)}"
-            )
-
-            for i, (part, exp_coords) in enumerate(zip(parts, expected), start=1):
-                assert isinstance(part, sg.LineString), f"{name} comp {i}: not a LineString"
-                got = list(map(tuple, part.coords))
-                assert got == exp_coords, (
-                    f"{name} comp {i}: coords mismatch.\nGot: {got}\nExp: {exp_coords}"
-                )
-                assert part.is_simple, f"{name} comp {i}: returned LineString not simple"
-
-
-    test_split_simple_0()
-    return (split_simple_0,)
-
-
-@app.cell
-def _():
-    return
-
-
-@app.cell
-def _(feed, split_simple_0):
-    g = feed.get_shapes(as_geo=True, use_utm=True).head(2).collect().st.to_geopandas()
-    ls = g["geometry"].to_list()[-1]
-    if ls.is_simple:
-        print("Nothing to do")
-    else:
-        print(list(ls.coords))
-        segments = split_simple_0(ls)
-        cum_length = 0
-        for s in segments:
-            d = s.length
-            cum_length += d
-            # print(s.is_simple, d)
-
-    # print(ls.length, cum_length)
-    # g.explore()
-    # print(list(ls.coords))
     return
 
 

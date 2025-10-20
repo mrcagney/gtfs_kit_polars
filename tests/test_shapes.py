@@ -106,8 +106,81 @@ def test_get_shapes_intersecting_geometry():
     assert gks.get_shapes_intersecting_geometry(cairns_shapeless, polygon) is None
 
 
+def test_split_simple_0():
+    def assert_simple_parts(name, parts, expected):
+        assert isinstance(parts, list), f"{name}: must return list"
+        assert len(parts) == len(expected), (
+            f"{name}: expected {len(expected)} components, got {len(parts)}"
+        )
+        for i, (part, exp_coords) in enumerate(zip(parts, expected), start=1):
+            assert isinstance(part, sg.LineString), f"{name} comp {i}: not a LineString"
+            got = list(map(tuple, part.coords))
+            assert got == exp_coords, (
+                f"{name} comp {i}: coords mismatch.\nGot: {got}\nExp: {exp_coords}"
+            )
+            assert part.is_simple, f"{name} comp {i}: returned LineString not simple"
+
+    # Test 1: straight line, no repeats -> single component
+    line1 = sg.LineString([(0, 0), (1, 0), (2, 0)])
+    expected1 = [[(0, 0), (1, 0), (2, 0)]]
+
+    # Test 2: loop then tail (includes a consecutive duplicate that should be ignored)
+    line2 = sg.LineString([(0, 0), (1, 0), (1, 0), (1, 1), (0, 1), (0, 0), (0, 1)])
+    expected2 = [[(0, 0), (1, 0), (1, 0), (1, 1), (0, 1), (0, 0)], [(0, 0), (0, 1)]]
+
+    # Test 3: doubles back on an interior vertex
+    line3 = sg.LineString([(0, 0), (2, 0), (2, 1), (1, 1), (1, 0), (2, 0), (3, 0)])
+    expected3 = [[(0, 0), (2, 0), (2, 1), (1, 1)], [(1, 1), (1, 0), (2, 0), (3, 0)]]
+
+    assert_simple_parts("straight", gks.split_simple_0(line1), expected1)
+    assert_simple_parts("loop_then_tail", gks.split_simple_0(line2), expected2)
+    assert_simple_parts("double_back", gks.split_simple_0(line3), expected3)
+
+    # Extra edge cases
+    # 4) Figure-8 crossing
+    line4 = sg.LineString([(0, 0), (2, 2), (0, 2), (2, 0)])
+    exp4 = [[(0, 0), (2, 2), (0, 2)], [(0, 2), (2, 0)]]
+    assert_simple_parts("figure8", gks.split_simple_0(line4), exp4)
+
+    # 5) T-junction interior
+    line5 = sg.LineString([(0, 0), (2, 0), (1, 0), (1, 1)])
+    exp5 = [[(0, 0), (2, 0)], [(2, 0), (1, 0), (1, 1)]]
+    assert_simple_parts("t_junction_interior", gks.split_simple_0(line5), exp5)
+
+    # 6) Close loop then continue
+    line6 = sg.LineString([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (2, 0)])
+    exp6 = [[(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)], [(0, 0), (2, 0)]]
+    assert_simple_parts("close_then_continue", gks.split_simple_0(line6), exp6)
+
+    # 7) Overlapping collinear segments
+    line7 = sg.LineString([(0, 0), (2, 0), (1, 0), (3, 0)])
+    exp7 = [[(0, 0), (2, 0)], [(2, 0), (1, 0)], [(1, 0), (3, 0)]]
+    assert_simple_parts("overlap_collinear", gks.split_simple_0(line7), exp7)
+
+    # 8) Envelope-touch case (vertical through horizontal at boundary)
+    line8 = sg.LineString([(0, 0), (2, 0), (1, 1), (1, -1)])
+    exp8 = [[(0, 0), (2, 0), (1, 1)], [(1, 1), (1, -1)]]
+    assert_simple_parts("envelope_touch", gks.split_simple_0(line8), exp8)
+
+    # 9) Non-consecutive duplicate revisit
+    line9 = sg.LineString([(0, 0), (1, 0), (1, 1), (1, 0), (2, 0)])
+    exp9 = [[(0, 0), (1, 0), (1, 1)], [(1, 1), (1, 0), (2, 0)]]
+    assert_simple_parts("nonconsecutive_dup_revisit", gks.split_simple_0(line9), exp9)
+
+
 def test_split_simple():
-    shapes_g = gks.get_shapes(cairns, as_geo=True, use_utm=True).head(20).collect()
+    shapes_g = (
+        gks.get_shapes(cairns, as_geo=True, use_utm=True)
+        .head(20)
+        .with_columns(
+            length=st.geom().st.length(),
+            is_simple=st.geom().st.is_simple(),
+        )
+        .collect()
+    )
+    # We should have some non-simple shapes to start with
+    assert not shapes_g["is_simple"].all()
+
     s = gks.split_simple(shapes_g).collect()
     assert set(s.columns) == {
         "shape_id",
@@ -117,10 +190,6 @@ def test_split_simple():
         "cum_length_m",
         "geometry",
     }
-    # Should have some non-simple shapes to start with
-    assert not shapes_g.with_columns(is_simple=st.geom().st.is_simple())[
-        "is_simple"
-    ].all()
 
     # All sublinestrings of result should be simple
     assert s.with_columns(is_simple=st.geom().st.is_simple())["is_simple"].all()
@@ -128,14 +197,13 @@ def test_split_simple():
     # Check each shape group
     for shape_id, group in s.partition_by("shape_id", as_dict=True).items():
         shape_id = shape_id[0]
-        ss = shapes_g.filter(pl.col("shape_id") == shape_id).with_columns(
-            length=st.geom().st.length()
-        )
+        ss = shapes_g.filter(pl.col("shape_id") == shape_id)
         # Each subshape should be shorter than shape
         assert (group["subshape_length_m"] <= ss["length"].sum()).all()
-        # Cumulative length should equal shape length within 1%
+        # Cumulative length should equal shape length within 0.1%
         L = ss["length"][0]
-        assert group["cum_length_m"].max() == pytest.approx(L, rel=0.01)
+        print(shape_id)
+        assert group["cum_length_m"].max() == pytest.approx(L, rel=0.001)
 
     # Create a (non-simple) bow-tie
     bowtie = st.GeoDataFrame(
