@@ -171,7 +171,6 @@ def test_split_simple_0():
 def test_split_simple():
     shapes_g = (
         gks.get_shapes(cairns, as_geo=True, use_utm=True)
-        .head(20)
         .with_columns(
             length=st.geom().st.length(),
             is_simple=st.geom().st.is_simple(),

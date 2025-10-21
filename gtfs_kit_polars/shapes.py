@@ -151,7 +151,7 @@ def get_shapes(
     """
     Get the shapes DataFrame for the given feed, which could be ``None``.
     If ``as_geo``, then return it as GeoDataFrame with a 'geometry' column
-    of linestrings and no 'shape_pt_sequence', 'shape_pt_lon', 'shape_pt_lat',
+    of LineStrings and no 'shape_pt_sequence', 'shape_pt_lon', 'shape_pt_lat',
     'shape_dist_traveled' columns.
     The GeoDataFrame will have a UTM CRS if ``use_utm``; otherwise it will have a
     WGS84 CRS.
@@ -248,8 +248,9 @@ def get_shapes_intersecting_geometry(
 
 def split_simple_0(ls: sg.LineString) -> list[sg.LineString]:
     """
-    Split the given LineString into simple sub-Linestrings
-    by traversing its noded coordinates and breaking at self-intersection vertices.
+    Split the given LineString into simple sub-LineStrings by greedily building
+    the segments from the curve points and binary search,
+    checking for simplicity at every step.
     """
     coords = ls.coords
     segments = []
@@ -274,27 +275,23 @@ def split_simple_0(ls: sg.LineString) -> list[sg.LineString]:
         segments.append(sg.LineString(coords[i : best + 1]))
         if best == n - 1:
             break
-        # Start next segment after current best segment
-        i = best  # + 1
+        # Start next segment from current best segment
+        i = best
     return segments
 
 
-# TODO: Port this properly to Polars ST
 def split_simple(
-    shapes_g: st.GeoLazyFrame | st.GeoDataFrame, segmentize_m: float = 5
+    shapes_g: st.GeoLazyFrame | st.GeoDataFrame
 ) -> st.GeoLazyFrame:
     """
-    Given GTFS shapes as a GeoDataFrame of the form output by :func:`geometrize_shapes`
-    and possibly in a non-WGS84 CRS,
-    split each non-simple LineString into maximal simple (non-self-intersecting)
+    Given a geotable of GTFS shapes of the form output by :func:`geometrize_shapes`
+    with possibly non-WGS84 coordinates,
+    split each non-simple LineString into large simple (non-self-intersecting)
     sub-LineStrings, and leave the simple LineStrings as is.
-    Before splitting, segmentize (with Shapely's ``segmentize`` method)
-    each non-simple LineString L by ``segmentize_m`` meters,
-    which also sets the maximum gap size between L's simple sub-LineStrings.
 
-    Return a geotable in the CRS of ``shapes_g`` with the columns
+    Return a geotable in the coordinates of ``shapes_g`` with the columns
 
-    - ``'shape_id'``: a unique identifier of the original LineString L
+    - ``'shape_id'``: GTFS shape ID for a LineString L
     - ``'subshape_id'``: a unique identifier of a simple sub-LineString S of L
     - ``'subshape_sequence'``: integer; indicates the order of S when joining up
       all simple sub-LineStrings to form L
@@ -306,20 +303,27 @@ def split_simple(
     Within each 'shape_id' group, the subshapes will be sorted increasingly by
     'subshape_sequence'.
 
-    Note that by construction, for each given LineString L with k simple subLineStrings
-    S_i, we have the inequalities
+    Notes
+    -----
+    - Simplicity checks and splitting are done in local UTM coordinates.
+      Converting back to original coordinates can introduce rounding errors and
+      non-simplicities.
+      So test this function with a ``shapes_g`` in local UTM coordinates.
+    - By construction, for each given LineString L with simple sub-LineStrings
+      S_i, we have the inequality
 
-    length(L) - k * segmentize_m <= sum over i of length(S_i) <= length(L),
+        sum over i of length(S_i) <= length(L),
 
-    where the lengths are expressed in meters.
+      where the lengths are expressed in meters.
 
-    Relies on GeoPandas for the time being.
     """
-    srid = hp.get_srid(shapes_g)
-    shapes_g = (
-        shapes_g.collect().st.to_geopandas()
-        if isinstance(shapes_g, pl.LazyFrame)
-        else shapes_g.st.to_geopandas()
+    # Log SRIDs
+    orig_srid = hp.get_srid(shapes_g)
+    utm_srid = hp.get_utm_srid(shapes_g)
+
+    # Work in local UTM coordinates for meter-based operations and simplicity detection
+    g = hp.to_srid(hp.make_lazy(shapes_g), utm_srid).with_columns(
+        is_simple=st.geom().st.is_simple()
     )
 
     final_cols = [
@@ -331,83 +335,82 @@ def split_simple(
         "geometry",
     ]
 
-    utm_crs = shapes_g.estimate_utm_crs()
-    g = shapes_g.assign(is_simple=lambda x: x.is_simple).to_crs(utm_crs)
-
-    # Simple shapes don't need splitting
+    # Simple shapes remain unchanged
     g0 = (
-        g.loc[lambda x: x["is_simple"]]
-        .assign(
-            subshape_id=lambda x: x["shape_id"].astype(str) + "-0",
-            subshape_sequence=0,
-            subshape_length_m=lambda x: x.length,
-            cum_length_m=lambda x: x["subshape_length_m"],
+        g.filter(pl.col("is_simple"))
+        .with_columns(
+            subshape_sequence=pl.lit(0, dtype=pl.Int32),
+            subshape_length_m=st.geom().st.length(),
+            cum_length_m=st.geom().st.length(),
+            subshape_id=(pl.col("shape_id").cast(pl.Utf8) + pl.lit("-0")),
         )
-        .filter(final_cols)
+        .select(final_cols)
     )
 
-    # Split the non-simple shapes
-    def my_split(group):
-        segments = split_simple_0(group["geometry"].iat[0])
-        return pd.DataFrame({"geometry": segments})
+    # Non-simple shapes need splitting
+
+    def split_group(df: pl.DataFrame) -> pl.DataFrame:
+        shape_id = df["shape_id"][0]
+        ls = sl.from_wkb(df["geometry"][0])  # Convert to Shapely
+        parts = [sl.to_wkb(p) for p in split_simple_0(ls)]  # Convert back to WKB
+        return pl.DataFrame(
+            {
+                "shape_id": [shape_id] * len(parts),
+                "subshape_sequence": list(range(len(parts))),
+                "geometry": parts,
+            }
+        )
+
+    schema = g.select("shape_id", "geometry").collect_schema()
 
     g1 = (
-        g.loc[lambda x: ~x["is_simple"]]
-        .assign(geometry=lambda x: x.segmentize(segmentize_m))
-        .groupby("shape_id", sort=False)
-        .apply(my_split, include_groups=False)
-        .reset_index()
-        .rename(columns={"level_1": "subshape_sequence"})
-        .assign(
-            subshape_id=lambda x: x["shape_id"].str.cat(
-                x["subshape_sequence"].astype(str), sep="-"
-            )
+        g.filter(~pl.col("is_simple"))
+        .select("shape_id", "geometry")
+        .group_by("shape_id")
+        .map_groups(
+            split_group,
+            schema=pl.Schema(
+                {
+                    "shape_id": schema["shape_id"],
+                    "subshape_sequence": pl.Int64,
+                    "geometry": schema["geometry"],  # usually Binary/WKB
+                }
+            ),
         )
-        .pipe(gpd.GeoDataFrame)
-        .set_crs(utm_crs)
-        .assign(
-            subshape_length_m=lambda x: x.length,
-            cum_length_m=lambda x: x.groupby("shape_id")["subshape_length_m"].cumsum(),
+        .with_columns(geometry=st.from_wkb("geometry").st.set_srid(utm_srid))
+        .with_columns(
+            subshape_length_m=st.geom().st.length(),
+            subshape_id=(
+                pl.col("shape_id").cast(pl.Utf8)
+                + pl.lit("-")
+                + pl.col("subshape_sequence").cast(pl.Utf8)
+            ),
         )
-        .filter(final_cols)
+        .with_columns(
+            cum_length_m=pl.col("subshape_length_m").cum_sum().over("shape_id"),
+        )
+        .select(final_cols)
     )
-    result = (
-        pd.concat([g0, g1], ignore_index=True)
-        .filter(
-            [
-                "subshape_id",
-                "subshape_sequence",
-                "shape_id",
-                "subshape_length_m",
-                "cum_length_m",
-                "geometry",
-            ]
-        )
-        .sort_values(["subshape_id", "subshape_sequence"], ignore_index=True)
-        .to_crs(shapes_g.crs)
-    )
+
+    # Collate and convert back to original coordinates
     return (
-        st.from_geopandas(result)
-        .with_columns(pl.col("geometry").st.set_srid(srid).alias("geometry"))
-        .lazy()
-        .pipe(hp.to_srid, srid)
+        pl.concat([g0, g1], how="vertical_relaxed")
+        .sort(["shape_id", "subshape_sequence"])
+        .pipe(hp.to_srid, orig_srid)
     )
 
-
-# TODO: Port this properly to Polars ST
-def split_simple_alt(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyFrame:
+def split_simple_bak(
+    shapes_g: st.GeoLazyFrame | st.GeoDataFrame
+) -> st.GeoLazyFrame:
     """
-    Given GTFS shapes as a GeoDataFrame of the form output by :func:`geometrize_shapes`
-    and possibly in a non-WGS84 CRS,
-    split each non-simple LineString into maximal simple (non-self-intersecting)
+    Given a geotable of GTFS shapes of the form output by :func:`geometrize_shapes`
+    with possibly non-WGS84 coordinates,
+    split each non-simple LineString into large simple (non-self-intersecting)
     sub-LineStrings, and leave the simple LineStrings as is.
-    Before splitting, segmentize (with Shapely's ``segmentize`` method)
-    each non-simple LineString L by ``segmentize_m`` meters,
-    which also sets the maximum gap size between L's simple sub-LineStrings.
 
-    Return a geotable in the CRS of ``shapes_g`` with the columns
+    Return a geotable in the coordinates of ``shapes_g`` with the columns
 
-    - ``'shape_id'``: a unique identifier of the original LineString L
+    - ``'shape_id'``: GTFS shape ID for a LineString L
     - ``'subshape_id'``: a unique identifier of a simple sub-LineString S of L
     - ``'subshape_sequence'``: integer; indicates the order of S when joining up
       all simple sub-LineStrings to form L
@@ -419,20 +422,21 @@ def split_simple_alt(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyF
     Within each 'shape_id' group, the subshapes will be sorted increasingly by
     'subshape_sequence'.
 
-    Note that by construction, for each given LineString L with k simple subLineStrings
-    S_i, we have the inequalities
+    Notes
+    -----
+    - Relies on GeoPandas.
+    - Simplicity checks and splitting are done in local UTM coordinates.
+      Converting back to original coordinates can introduce rounding errors and
+      non-simplicities.
+      So test this function with a ``shapes_g`` in local UTM coordinates.
+    - By construction, for each given LineString L with simple sub-LineStrings
+      S_i, we have the inequality
 
-    length(L) - k * segmentize_m <= sum over i of length(S_i) <= length(L),
+        sum over i of length(S_i) <= length(L),
 
-    where the lengths are expressed in meters.
+      where the lengths are expressed in meters.
 
-    Relies on GeoPandas for the time being.
     """
-
-    def my_split(group):
-        segments = split_simple_0(group["geometry"].iat[0])
-        return pd.DataFrame({"geometry": segments})
-
     srid = hp.get_srid(shapes_g)
     shapes_g = (
         shapes_g.collect().st.to_geopandas()
@@ -448,9 +452,8 @@ def split_simple_alt(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyF
         "cum_length_m",
         "geometry",
     ]
-
     utm_crs = shapes_g.estimate_utm_crs()
-    g = shapes_g.assign(is_simple=lambda x: x.is_simple).to_crs(utm_crs)
+    g = shapes_g.to_crs(utm_crs).assign(is_simple=lambda x: x.is_simple)
 
     # Simple shapes don't need splitting
     g0 = (
@@ -465,6 +468,10 @@ def split_simple_alt(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyF
     )
 
     # Split the non-simple shapes
+    def my_split(group):
+        segments = split_simple_0(group["geometry"].iat[0])
+        return pd.DataFrame({"geometry": segments})
+
     g1 = (
         g.loc[lambda x: ~x["is_simple"]]
         .groupby("shape_id", sort=False)
@@ -486,16 +493,7 @@ def split_simple_alt(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyF
     )
     result = (
         pd.concat([g0, g1], ignore_index=True)
-        .filter(
-            [
-                "shape_id",
-                "subshape_id",
-                "subshape_sequence",
-                "subshape_length_m",
-                "cum_length_m",
-                "geometry",
-            ]
-        )
+        .filter(final_cols)
         .sort_values(["shape_id", "subshape_sequence"], ignore_index=True)
         .to_crs(shapes_g.crs)
     )
@@ -503,5 +501,5 @@ def split_simple_alt(shapes_g: st.GeoLazyFrame | st.GeoDataFrame) -> st.GeoLazyF
         st.from_geopandas(result)
         .with_columns(pl.col("geometry").st.set_srid(srid).alias("geometry"))
         .lazy()
-        .pipe(hp.to_srid, srid)
     )
+

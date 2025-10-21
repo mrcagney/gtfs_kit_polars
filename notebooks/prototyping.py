@@ -42,7 +42,7 @@ def _(gk, pb):
     feed = gk.read_feed(
         pb.Path.home() / "Desktop" / "auckland_gtfs_20250918.zip", dist_units="km"
     )
-    #feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
+    # feed = gk.read_feed(DATA / "cairns_gtfs.zip", dist_units="km")
     return (feed,)
 
 
@@ -56,18 +56,25 @@ def _(feed):
 
 @app.cell
 def _():
-    # ts = feed.compute_route_time_series(dates, num_minutes=60).collect()
     return
 
 
 @app.cell
-def _(feed, gk, pl, st):
+def _(feed, gk, split_simple, st):
     g = (
-        gk.split_simple_alt(feed.get_shapes(as_geo=True))
+        split_simple(feed.get_shapes(as_geo=True, use_utm=False))
         .collect()
+        .pipe(gk.to_srid, 32760)
         .with_columns(is_simple=st.geom().st.is_simple())
     )
-    g.filter(~pl.col("is_simple"))
+    if not g["is_simple"].all():
+        gg = g.st.to_geopandas().loc[lambda x: ~x["is_simple"]]
+        print(gg.crs)
+        map = gg.explore()
+    else:
+        map = None
+        print("All simple")
+    map
     return
 
 
@@ -75,10 +82,14 @@ def _(feed, gk, pl, st):
 def _(feed, gk, pl, st):
     import pytest
 
-    shapes_g = gk.get_shapes(feed, as_geo=True, use_utm=True).with_columns(
+    shapes_g = (
+        gk.get_shapes(feed, as_geo=True, use_utm=True)
+        .with_columns(
             length=st.geom().st.length(),
             is_simple=st.geom().st.is_simple(),
-        ).collect()
+        )
+        .collect()
+    )
     # We should have some non-simple shapes to start with
     assert not shapes_g["is_simple"].all()
 
@@ -104,8 +115,6 @@ def _(feed, gk, pl, st):
         # Cumulative length should equal shape length within 1%
         L = ss["length"][0]
         assert group["cum_length_m"].max() == pytest.approx(L, rel=0.001)
-
-
     return
 
 
