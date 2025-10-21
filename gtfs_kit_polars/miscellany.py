@@ -1068,7 +1068,6 @@ def compute_screen_line_counts(
     feed: "Feed",
     screen_lines: gpd.GeoDataFrame,
     dates: list[str],
-    segmentize_m: float = 5,
     *,
     include_testing_cols: bool = False,
 ) -> pd.DataFrame:
@@ -1077,7 +1076,6 @@ def compute_screen_line_counts(
     the given segment-associated screen lines of the form output by
     :func:`build_screen_lines`.
     Behind the scenes, use simple sub-LineStrings of the feed
-    (with points separated by at ``segmentize_m`` meters)
     to compute screen line intersections.
     Using them instead of the Feed shapes avoids miscounting intersections in the
     case of non-simple (self-intersecting) shapes.
@@ -1154,13 +1152,11 @@ def compute_screen_line_counts(
     screen_lines["screen_line_vector"] = p2 - p1
 
     # Get the simple subshapes that intersect the screen lines.
-    # Need subshapes to have only small gaps between them,
-    # so `segmentize_m` needs to be small.
     subshapes = (
         feed.get_shapes(as_geo=True, use_utm=True)
         .sjoin(screen_lines)
         .drop_duplicates("shape_id")
-        .pipe(split_simple, segmentize_m=segmentize_m)
+        .pipe(split_simple)
     )
 
     # Get intersection points of subshapes and screen lines

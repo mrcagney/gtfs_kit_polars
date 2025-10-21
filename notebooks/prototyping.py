@@ -55,14 +55,9 @@ def _(feed):
 
 
 @app.cell
-def _():
-    return
-
-
-@app.cell
-def _(feed, gk, split_simple, st):
+def _(feed, gk, st):
     g = (
-        split_simple(feed.get_shapes(as_geo=True, use_utm=False))
+        gk.split_simple(feed.get_shapes(as_geo=True, use_utm=False))
         .collect()
         .pipe(gk.to_srid, 32760)
         .with_columns(is_simple=st.geom().st.is_simple())
