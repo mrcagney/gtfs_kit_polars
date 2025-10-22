@@ -163,13 +163,25 @@ def test_build_route_timetable():
 
 def test_routes_to_geojson():
     feed = cairns.copy()
-    route_ids = feed.routes.head(2).collect()["route_id"].to_list()
-    n = len(route_ids)
-
-    gj = gkr.routes_to_geojson(feed, route_ids)
+    n = 3
+    route_ids = feed.routes.head(n).collect()["route_id"].to_list()
+    route_short_names = (
+        feed.routes.filter(pl.col("route_id") == route_ids[-1])
+        .collect()["route_short_name"]
+        .to_list()
+    )
+    route_ids = route_ids[: n - 1]
+    gj = gkr.routes_to_geojson(
+        feed, route_ids=route_ids, route_short_names=route_short_names
+    )
     assert len(gj["features"]) == n
 
-    gj = gkr.routes_to_geojson(feed, route_ids, include_stops=True)
+    gj = gkr.routes_to_geojson(
+        feed,
+        route_ids=route_ids,
+        route_short_names=route_short_names,
+        include_stops=True,
+    )
     k = (
         feed.stop_times.join(feed.trips, "trip_id")
         .filter(pl.col("route_id").is_in(route_ids))
@@ -385,9 +397,8 @@ def test_compute_route_time_series_0():
 
 def test_compute_route_time_series():
     feed = cairns.copy()
-    dates = cairns_dates  # Spans three consecutive dates
-    n = 3
-    rids = cairns_trip_stats["route_id"].unique().to_list()[:n]
+    dates = cairns_dates
+    rids = cairns_trip_stats["route_id"].unique().to_list()[:3]
     trip_stats = cairns_trip_stats.filter(pl.col("route_id").is_in(rids))
 
     for split_directions in [True, False]:
@@ -403,11 +414,12 @@ def test_compute_route_time_series():
         ).collect()
 
         # Should have correct num rows
+        n = rs.height
         if split_directions:
-            assert rts.shape[0] >= len(dates) * n * 2
+            assert rts.height >= n * 2
         else:
             # date span * num routes * num time chunks
-            assert rts.shape[0] == len(dates) * n * 2
+            assert rts.height == n * 2
 
         # Should have correct columns
         expect_cols = {

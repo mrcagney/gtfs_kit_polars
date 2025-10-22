@@ -136,7 +136,8 @@ def build_route_timetable(
 
 def routes_to_geojson(
     feed: "Feed",
-    route_ids: Iterable[str | None] = None,
+    route_ids: Iterable[str] | None = None,
+    route_short_names: Iterable[str] | None = None,
     *,
     split_directions: bool = False,
     include_stops: bool = False,
@@ -145,16 +146,29 @@ def routes_to_geojson(
     Return a GeoJSON FeatureCollection (in WGS84 coordinates) of MultiLineString
     features representing this Feed's routes.
 
-    If an iterable of route IDs is given, then subset to those routes, which could
-    yield an empty FeatureCollection in case of all invalid route IDs.
+    If an iterable of route IDs or route short names is given,
+    then subset to the union of those routes, which could
+    yield an empty FeatureCollection in case of all invalid route IDs and route short
+    names.
     If ``include_stops``, then include the route stops as Point features.
     If the Feed has no shapes, then raise a ValueError.
     """
     g = get_routes(feed, as_geo=True, split_directions=split_directions)
-    if route_ids:
-        g = g.filter(pl.col("route_id").is_in(route_ids))
 
-    if g is None or hp.is_empty(g):
+    # Restrict routes if given
+    R = set()
+    if route_ids is not None:
+        R |= set(route_ids)
+    if route_short_names is not None:
+        R |= set(
+            feed.routes.filter(
+                pl.col("route_short_name").is_in(route_short_names)
+            ).collect()["route_id"]
+        )
+    if R:
+        g = g.filter(pl.col("route_id").is_in(R))
+
+    if hp.is_empty(g):
         result = {
             "type": "FeatureCollection",
             "features": [],
@@ -846,8 +860,7 @@ def compute_route_time_series(
     Compute route stats in time series form at the given ``num_minutes`` frequency
     for the trips that lie in the trip stats subset,
     which defaults to the output of :func:`.trips.compute_trip_stats`,
-    and that start on the given dates
-    (YYYYMMDD date strings).
+    and that start on the given dates (YYYYMMDD date strings).
 
     If ``split_directions``, then separate each routes's stats by trip direction.
 
@@ -880,6 +893,8 @@ def compute_route_time_series(
     -----
     - If you've already computed trip stats in your workflow, then you should pass
       that table into this function to speed things up significantly.
+    - If a route does not run on a given date, then it won't appear in the time series
+      for that date
     - See the notes for :func:`compute_route_time_series_0`
     - Raise a ValueError if ``split_directions`` and no non-null
       direction ID values present
