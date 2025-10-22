@@ -201,7 +201,6 @@ def test_split_simple():
         assert (group["subshape_length_m"] <= ss["length"].sum()).all()
         # Cumulative length should equal shape length within 0.1%
         L = ss["length"][0]
-        print(shape_id)
         assert group["cum_length_m"].max() == pytest.approx(L, rel=0.001)
 
     # Create a (non-simple) bow-tie
