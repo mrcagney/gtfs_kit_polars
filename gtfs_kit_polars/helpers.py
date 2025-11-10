@@ -59,6 +59,7 @@ def is_not_null(f: pl.DataFrame | pl.LazyFrame, col_name: str) -> bool:
     else:
         return False
 
+
 def are_equal(f: pl.DataFrame | pl.LazyFrame, g: pl.DataFrame | pl.LazyFrame) -> bool:
     """
     Return True if and only if the tables are equal after sorting column names
@@ -81,6 +82,7 @@ def are_equal(f: pl.DataFrame | pl.LazyFrame, g: pl.DataFrame | pl.LazyFrame) ->
     G = G.select(cols).sort(cols)
     return F.equals(G, null_equal=True)
 
+
 def get_srid(g: pl.DataFrame | pl.LazyFrame) -> int:
     """
     Table version of the Polars ST function ``srid``.
@@ -101,10 +103,10 @@ def get_utm_srid(g: st.GeoDataFrame | st.GeoLazyFrame) -> int:
     """
     Return the UTM SRID for the given geotable.
     """
-    g = g.lazy() if isinstance(g, pl.DataFrame) else g
     lon, lat = (
-        g.limit(1)
-        .select(geometry=pl.col("geometry").st.to_srid(cs.WGS84).st.coordinates())
+        make_lazy(g)
+        .limit(1)
+        .select(geometry=st.geom().st.to_srid(cs.WGS84).st.coordinates())
         .collect()
         .row(0)[0][0]
     )
@@ -115,7 +117,7 @@ def to_srid(g: pl.DataFrame | pl.LazyFrame, srid: int) -> pl.DataFrame | pl.Lazy
     """
     Table version of the Polars ST function ``to_srid``.
     """
-    return g.with_columns(geometry=pl.col("geometry").st.to_srid(srid))
+    return g.with_columns(geometry=st.geom().st.to_srid(srid))
 
 
 # ------------------------------------
@@ -203,7 +205,9 @@ def timestr_to_min(col: str) -> pl.Expr:
     return timestr_to_seconds(col, mod24=True) // 60
 
 
-def replace_date(f: pl.DataFrame|pl.LazyFrame, date: str) -> pl.DataFrame|pl.LazyFrame:
+def replace_date(
+    f: pl.DataFrame | pl.LazyFrame, date: str
+) -> pl.DataFrame | pl.LazyFrame:
     """
     Given a table with a datetime object column called 'datetime' and given a
     YYYYMMDD date string, replace the datetime dates with the given date
