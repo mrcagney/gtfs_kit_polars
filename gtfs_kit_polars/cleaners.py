@@ -44,7 +44,12 @@ def clean_ids(feed: "Feed") -> "Feed":
         names = f.collect_schema().names()
         for col in d:
             if col in names and d[col] == pl.Utf8 and col.endswith("_id"):
-                f = f.with_columns(pl.col(col).str.strip_chars().str.replace_all(r"\s+", "_").alias(col))
+                f = f.with_columns(
+                    pl.col(col)
+                    .str.strip_chars()
+                    .str.replace_all(r"\s+", "_")
+                    .alias(col)
+                )
                 setattr(feed, table, f)
 
     return feed
@@ -117,6 +122,7 @@ def clean_times(feed: "Feed") -> "Feed":
 
     return feed
 
+
 def clean_route_short_names(feed: "Feed") -> "Feed":
     """
     In ``feed.routes``, assign 'n/a' to missing route short names and
@@ -142,10 +148,7 @@ def clean_route_short_names(feed: "Feed") -> "Feed":
 
     # Mark duplicates and disambiguate by appending "-<route_id>"
     r = (
-        r
-        .with_columns(
-            dup=(pl.len().over("route_short_name") > 1)
-        )
+        r.with_columns(dup=(pl.len().over("route_short_name") > 1))
         .with_columns(
             route_short_name=(
                 pl.when(pl.col("dup"))
@@ -157,6 +160,7 @@ def clean_route_short_names(feed: "Feed") -> "Feed":
     )
     feed.routes = r
     return feed
+
 
 def drop_zombies(feed: "Feed") -> "Feed":
     """
@@ -179,7 +183,9 @@ def drop_zombies(feed: "Feed") -> "Feed":
         feed.agency = feed.agency.join(r_ag, on="agency_id", how="inner")
 
     # 2) Drop stops of location_type 0/None that have no stop_times
-    st_stop_ids = feed.stop_times.select("stop_id").unique().collect()["stop_id"].to_list()
+    st_stop_ids = (
+        feed.stop_times.select("stop_id").unique().collect()["stop_id"].to_list()
+    )
     base_keep = pl.col("stop_id").is_in(st_stop_ids)
     if "location_type" in feed.stops.collect_schema().names():
         keep = base_keep | ~pl.col("location_type").is_in([0, None])
@@ -189,11 +195,11 @@ def drop_zombies(feed: "Feed") -> "Feed":
 
     # 3) Clean undefined parent_station → null
     if "parent_station" in feed.stops.collect_schema().names():
-        stop_ids_for_parent = feed.stops.select("stop_id").unique().collect()["stop_id"].to_list()
+        stop_ids_for_parent = (
+            feed.stops.select("stop_id").unique().collect()["stop_id"].to_list()
+        )
         feed.stops = feed.stops.with_columns(
-            parent_station=pl.when(
-                pl.col("parent_station").is_in(stop_ids_for_parent)
-            )
+            parent_station=pl.when(pl.col("parent_station").is_in(stop_ids_for_parent))
             .then(pl.col("parent_station"))
             .otherwise(None)
         )
@@ -223,36 +229,6 @@ def drop_zombies(feed: "Feed") -> "Feed":
     return feed
 
 
-
-def build_aggregate_routes_dict(
-    routes: pl.DataFrame | pl.LazyFrame, by: str = "route_short_name", route_id_prefix: str = "route_"
-) -> dict[str, str]:
-    """
-    Given a DataFrame of routes, group the routes by route short name, say,
-    and assign new route IDs using the given prefix.
-    Return a dictionary of the form <old route ID> -> <new route ID>.
-    Helper function for :func:`aggregate_routes`.
-
-    More specifically, group ``routes`` by the ``by`` column, and for each group make
-    one new route ID for all the old route IDs in that group based on the given
-    ``route_id_prefix`` string and a running count, e.g. ``'route_013'``.
-    """
-    routes = hp.make_lazy(routes).collect()
-    if by not in routes.columns:
-        raise ValueError(f"Column {by} not in routes.")
-
-    # Create new route IDs
-    n = routes.select(by).n_unique()
-    nids = hp.make_ids(n, route_id_prefix)
-    nid_by_oid = dict()
-    i = 0
-    for group in routes.partition_by(by):
-        d = {oid: nids[i] for oid in group["route_id"].to_list()}
-        nid_by_oid.update(d)
-        i += 1
-
-    return nid_by_oid
-
 def build_aggregate_routes_table(
     routes: pl.DataFrame | pl.LazyFrame,
     by: str = "route_short_name",
@@ -273,27 +249,24 @@ def build_aggregate_routes_table(
     if "route_id" not in schema:
         raise ValueError("Column 'route_id' not in routes.")
 
-    # Distinct groups (small), deterministically ordered
-    groups = (
-        routes
-        .select(pl.col(by))
-        .unique()
-        .collect()
-    )
+    # Distinct groups (small)
+    groups = routes.select(pl.col(by)).unique().collect()
 
     # One new id per group (uses your helper for padding/format)
-    group_map = pl.LazyFrame({by: groups[by], "new_route_id": hp.make_ids(groups.height, route_id_prefix)})
+    group_map = pl.LazyFrame(
+        {by: groups[by], "new_route_id": hp.make_ids(groups.height, route_id_prefix)}
+    )
 
     # Join back to get old->new mapping, then drop dups
     return (
-        routes
-        .join(group_map, on=by, how="left")
+        routes.join(group_map, on=by, how="left")
         .select(
             "route_id",
             "new_route_id",
         )
         .unique()
     )
+
 
 def aggregate_routes(
     feed: "Feed", by: str = "route_short_name", route_id_prefix: str = "route_"
@@ -303,103 +276,163 @@ def aggregate_routes(
     given prefix.
 
     More specifically, create new route IDs with the function
-    :func:`build_aggregate_routes_dict` and the parameters ``by`` and
+    :func:`build_aggregate_routes_table` and the parameters ``by`` and
     ``route_id_prefix`` and update the old route IDs to the new ones in all the relevant
     Feed tables.
     Return the resulting Feed.
     """
     feed = feed.copy()
 
-    # Make new route IDs
-    routes = feed.routes
-    nid_by_oid = build_aggregate_routes_dict(routes, by, route_id_prefix)
+    # Build mapping: old route_id -> new_route_id  (LazyFrame with cols ["route_id","new_route_id"])
+    route_map = build_aggregate_routes_table(
+        feed.routes, by=by, route_id_prefix=route_id_prefix
+    )
 
-    # Update route IDs in routes
-    routes["route_id"] = routes.route_id.map(lambda x: nid_by_oid[x])
-    routes = routes.groupby(by).first().reset_index()
-    feed.routes = routes
+    # Update routes
+    feed.routes = (
+        feed.routes.join(route_map, on="route_id", how="left")
+        .with_columns(pl.col("new_route_id").alias("route_id"))
+        .drop("new_route_id")
+        # Collapse to one row per group
+        .sort([by, "route_id"])
+        .unique(subset=[by], keep="first")
+    )
 
-    # Update route IDs in trips
-    trips = feed.trips
-    trips["route_id"] = trips.route_id.map(lambda x: nid_by_oid[x])
-    feed.trips = trips
+    # Update trips
+    feed.trips = (
+        feed.trips.join(route_map, on="route_id", how="left")
+        .with_columns(pl.col("new_route_id").alias("route_id"))
+        .drop("new_route_id")
+    )
 
-    # Update route IDs of fare rules
-    if feed.fare_rules is not None and "route_id" in feed.fare_rules.columns:
-        fr = feed.fare_rules
-        fr["route_id"] = fr.route_id.map(lambda x: nid_by_oid[x])
-        feed.fare_rules = fr
-
+    # Update fare_rules
+    if (
+        feed.fare_rules is not None
+        and "route_id" in feed.fare_rules.collect_schema().names()
+    ):
+        feed.fare_rules = (
+            feed.fare_rules.join(route_map, on="route_id", how="left")
+            .with_columns(
+                # If some fare rules had no route bound, keep original (left join)
+                pl.when(pl.col("new_route_id").is_not_null())
+                .then(pl.col("new_route_id"))
+                .otherwise(pl.col("route_id"))
+                .alias("route_id")
+            )
+            .drop("new_route_id")
+        )
     return feed
 
 
-def build_aggregate_stops_dict(
-    stops: pd.DataFrame, by: str = "stop_code", stop_id_prefix: str = "stop_"
-) -> dict[str, str]:
+def build_aggregate_stops_table(
+    stops: pl.DataFrame | pl.LazyFrame,
+    by: str = "stop_code",
+    stop_id_prefix: str = "stop_",
+) -> pl.LazyFrame:
     """
-    Given a DataFrame of stops, group the stops by stop code, say,
-    and assign new stop IDs using the given prefix.
-    Return a dictionary of the form <old stop ID> -> <new stop ID>.
-    Helper function for :func:`aggregate_stops`.
+    Group stops by the ``by`` column and assign one new stop ID per group
+    using the given prefix. Return a table with columns
 
-    More specifically, group ``stops`` by the ``by`` column, and for each group make
-    one new stop ID for all the old stops IDs in that group based on the given
-    ``stop_id_prefix`` string and a running count, e.g. ``'stop_013'``.
+    - ``stop_id``
+    - ``new_stop_id``
+
     """
-    if by not in stops.columns:
+    stops = hp.make_lazy(stops)
+    schema = stops.collect_schema().names()
+    if by not in schema:
         raise ValueError(f"Column {by} not in stops.")
+    if "stop_id" not in schema:
+        raise ValueError("Column 'stop_id' not in stops.")
 
-    # Create new stop IDs
-    n = stops.groupby(by).ngroups
-    nids = hp.make_ids(n, stop_id_prefix)
-    nid_by_oid = dict()
-    i = 0
-    for col, group in stops.groupby(by):
-        d = {oid: nids[i] for oid in group.stop_id.values}
-        nid_by_oid.update(d)
-        i += 1
+    # Distinct groups (deterministic order)
+    groups = stops.select(pl.col(by)).unique().sort(by).collect()
 
-    return nid_by_oid
+    # One new id per group
+    group_map = pl.LazyFrame(
+        {
+            by: groups[by],
+            "new_stop_id": hp.make_ids(groups.height, stop_id_prefix),
+        }
+    )
+
+    # Map old -> new, then dedupe
+    return (
+        stops.join(group_map, on=by, how="left")
+        .select("stop_id", "new_stop_id")
+        .unique()
+    )
 
 
 def aggregate_stops(
-    feed: "Feed", by: str = "stop_code", stop_id_prefix: str = "stop_"
+    feed: "Feed",
+    by: str = "stop_code",
+    stop_id_prefix: str = "stop_",
 ) -> "Feed":
     """
-    Aggregate stops by stop code, say, and assign new stop IDs using the
-    given prefix.
-
-    More specifically, create new stop IDs with the function
-    :func:`build_aggregate_stops_dict` and the parameters ``by`` and
-    ``stop_id_prefix`` and update the old stop IDs to the new ones in all the relevant
-    Feed tables.
-    Return the resulting Feed.
+    Aggregate stops by the column `by` and assign new stop IDs using the given prefix.
+    Update IDs in stops, stop_times, and transfers. Return the resulting Feed.
     """
     feed = feed.copy()
 
-    # Make new stop ID by old stop ID dict
-    stops = feed.stops
-    nid_by_oid = build_aggregate_stops_dict(stops, by, stop_id_prefix)
+    # Build 'stop_id' -> 'new_stop_id' mapping (table)
+    mapping = build_aggregate_stops_table(
+        feed.stops, by=by, stop_id_prefix=stop_id_prefix
+    )
 
-    # Apply dict
-    stops["stop_id"] = stops.stop_id.map(nid_by_oid)
-    if "parent_station" in stops:
-        stops["parent_station"] = stops.parent_station.map(nid_by_oid)
+    # Update stops
+    stops = (
+        feed.stops.join(mapping, on="stop_id", how="left")
+        .with_columns(stop_id=pl.coalesce([pl.col("new_stop_id"), pl.col("stop_id")]))
+        .drop("new_stop_id")
+    )
 
-    stops = stops.groupby(by).first().reset_index()
-    feed.stops = stops
+    if "parent_station" in stops.collect_schema().names():
+        parent_map = mapping.rename(
+            {"stop_id": "parent_station", "new_stop_id": "new_parent_station"}
+        )
+        stops = (
+            stops.join(parent_map, on="parent_station", how="left")
+            .with_columns(
+                parent_station=pl.coalesce(
+                    [pl.col("new_parent_station"), pl.col("parent_station")]
+                )
+            )
+            .drop("new_parent_station")
+        )
+    feed.stops = (
+        stops
+        # Collapse to one row per group
+        .sort([by, "stop_id"]).unique(subset=[by], keep="first")
+    )
 
-    # Update stop IDs of stop times
-    stop_times = feed.stop_times
-    stop_times["stop_id"] = stop_times.stop_id.map(lambda x: nid_by_oid[x])
-    feed.stop_times = stop_times
+    # Update stop times
+    feed.stop_times = (
+        feed.stop_times.join(mapping, on="stop_id", how="left")
+        .with_columns(stop_id=pl.coalesce([pl.col("new_stop_id"), pl.col("stop_id")]))
+        .drop("new_stop_id")
+    )
 
-    # Update route IDs of transfers
+    # Update transfers
     if feed.transfers is not None:
-        transfers = feed.transfers
-        transfers["to_stop_id"] = transfers.to_stop_id.map(lambda x: nid_by_oid[x])
-        transfers["from_stop_id"] = transfers.from_stop_id.map(lambda x: nid_by_oid[x])
-        feed.transfers = transfers
+        map_to = mapping.rename(
+            {"stop_id": "to_stop_id", "new_stop_id": "new_to_stop_id"}
+        )
+        map_from = mapping.rename(
+            {"stop_id": "from_stop_id", "new_stop_id": "new_from_stop_id"}
+        )
+        feed.transfers = (
+            feed.transfers.join(map_to, on="to_stop_id", how="left")
+            .join(map_from, on="from_stop_id", how="left")
+            .with_columns(
+                to_stop_id=pl.coalesce(
+                    [pl.col("new_to_stop_id"), pl.col("to_stop_id")]
+                ),
+                from_stop_id=pl.coalesce(
+                    [pl.col("new_from_stop_id"), pl.col("from_stop_id")]
+                ),
+            )
+            .drop("new_to_stop_id", "new_from_stop_id")
+        )
 
     return feed
 
@@ -435,10 +468,7 @@ def drop_invalid_columns(feed: "Feed") -> "Feed":
         if f is None:
             continue
         valid_columns = set(d.keys())
-        for col in f.columns:
-            if col not in valid_columns:
-                print(f"{table}: dropping invalid column {col}")
-                del f[col]
-        setattr(feed, table, f)
+        drop_cols = set(f.collect_schema().names()) - valid_columns
+        setattr(feed, table, f.drop(drop_cols))
 
     return feed

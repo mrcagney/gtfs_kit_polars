@@ -26,7 +26,7 @@ Progress
 Progress porting the Pandas original to Polars.
 
 [x] calendar.py
-[] cleaners.py
+[x] cleaners.py
 [x] constants.py
 [x] feed.py
 [x] helpers.py

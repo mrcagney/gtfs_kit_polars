@@ -193,7 +193,7 @@ class Feed(object):
             if prop in cs.FEED_ATTRS:
                 if prop not in {"dist_units", "unzip_dir"} and val is not None:
                     # Coerce to lazy frame
-                    setattr(self, prop, val.lazy())
+                    setattr(self, prop, hp.make_lazy(val))
                 else:
                     setattr(self, prop, val)
 
@@ -260,8 +260,8 @@ class Feed(object):
         other = Feed(dist_units=self.dist_units, unzip_dir=self.unzip_dir)
         for key in set(cs.FEED_ATTRS) - {"unzip_dir", "dist_units"}:
             value = getattr(self, key)
-            if isinstance(value, pl.LazyFrame):
-                value = value.clone()
+            if isinstance(value, (pl.DataFrame, pl.LazyFrame)):
+                value = hp.make_lazy(value.clone())
             setattr(other, key, value)
         return other
 
@@ -407,6 +407,7 @@ def _read_feed_from_path(path: pb.Path, dist_units: str) -> "Feed":
     feed_dict["dist_units"] = dist_units
 
     return Feed(**feed_dict)
+
 
 def _read_feed_from_url(url: str, dist_units: str) -> "Feed":
     """
