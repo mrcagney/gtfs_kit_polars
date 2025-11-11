@@ -230,22 +230,20 @@ class Feed(object):
     def __eq__(self, other) -> bool:
         """
         Define two feeds be equal if and only if their
-        :const:`.constants.FEED_ATTRS` attributes are equal,
-        or almost equal in the case of DataFrames
-        (but not groupby DataFrames).
-        Almost equality is checked via :func:`.helpers.almost_equal`,
-        which canonically sorts DataFrame rows and columns.
+        feed attributes, excluding ``unzip_dir``, are equal.
+        Equality for Lazy/DateFrames is checked via :func:`.helpers.are_equal`,
+        which canonically sorts table rows and columns.
         """
         if self is other:
             return True
         if not isinstance(other, Feed):
             return NotImplemented
 
-        for key in cs.FEED_ATTRS:
+        for key in set(cs.FEED_ATTRS) - {"unzip_dir"}:
             x = getattr(self, key)
             y = getattr(other, key)
-            if isinstance(x, pl.LazyFrame):
-                if not isinstance(y, pl.LazyFrame) or not hp.are_equal(x, y):
+            if isinstance(x, (pl.LazyFrame, pl.DataFrame)):
+                if not hp.are_equal(x, y):
                     return False
             else:
                 if x != y:

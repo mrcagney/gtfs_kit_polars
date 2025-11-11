@@ -536,30 +536,42 @@ def test_compute_screen_line_counts():
     # Load screen line
     path = DATA_DIR / "cairns_screen_lines.geojson"
     screen_lines = st.read_file(path)
-    f = gkm.compute_screen_line_counts(feed, screen_lines, dates)
 
-    # Should have correct columns
-    expect_cols = {
-        "date",
-        "screen_line_id",
-        "trip_id",
-        "direction_id",
-        "route_id",
-        "route_short_name",
-        "route_type",
-        "shape_id",
-        "crossing_direction",
-        "crossing_dist_m",
-        "crossing_time",
-    }
-    assert set(f.columns) == expect_cols
+    for diag in [True, False]:
+        f = gkm.compute_screen_line_counts(feed, screen_lines, dates, include_diagnostics=diag).collect()
 
-    # Should have both directions
-    assert set(f.crossing_direction.unique()) == {-1, 1}
+        # Should have correct columns
+        expect_cols = {
+            "date",
+            "screen_line_id",
+            "trip_id",
+            "direction_id",
+            "route_id",
+            "route_short_name",
+            "route_type",
+            "shape_id",
+            "crossing_direction",
+            "crossing_dist_m",
+            "crossing_time",
+        }
+        if diag:
+            expect_cols |= {
+            "subshape_id",
+            "subshape_length_m",
+            "from_departure_time",
+            "to_departure_time",
+            "subshape_dist_frac",
+            "subshape_dist_m",
+        }
+        assert set(f.columns) == expect_cols
 
-    # Should only have feed dates
-    assert set(f["date"].values) == set(dates)
+
+        # Should have both directions
+        assert set(f["crossing_direction"]) == {-1, 1}
+
+        # Should only have feed dates
+        assert set(f["date"]) == set(dates)
 
     # Empty check
     f = gkm.compute_screen_line_counts(feed, screen_lines, ["20010101"])
-    assert f.is_empty()
+    assert gkh.is_empty(f)
