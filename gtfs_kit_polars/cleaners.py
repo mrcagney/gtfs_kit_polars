@@ -6,14 +6,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
 import polars as pl
 
 from . import constants as cs
 from . import helpers as hp
 
-# Help mypy but avoid circular imports
+# Help type checkers but avoid circular imports
 if TYPE_CHECKING:
     from .feed import Feed
 

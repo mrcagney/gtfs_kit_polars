@@ -17,7 +17,7 @@ import shapely.geometry as sg
 from . import constants as cs
 from . import helpers as hp
 
-# Help mypy but avoid circular imports
+# Help type checkers but avoid circular imports
 if TYPE_CHECKING:
     from .feed import Feed
 
@@ -681,8 +681,7 @@ def compute_network_time_series(
         group_cols.append("route_type")
 
     return (
-        rts
-        .group_by(group_cols)
+        rts.group_by(group_cols)
         .agg(**{c: pl.col(c).sum() for c in metrics})
         .with_columns(
             service_speed=(
@@ -836,8 +835,9 @@ def compute_convex_hull(feed: "Feed", stop_ids: list[str] | None = None) -> sg.P
     if stop_ids is not None:
         g = g.filter(pl.col("stop_id").is_in(stop_ids))
 
-    return sl.from_wkb(g.select(st.geom().st.union_all().st.convex_hull()).head(1).collect().row(0)[0])
-
+    return sl.from_wkb(
+        g.select(st.geom().st.union_all().st.convex_hull()).head(1).collect().row(0)[0]
+    )
 
 
 def compute_centroid(feed: "Feed", stop_ids: list[str] | None = None) -> sg.Point:
@@ -851,7 +851,12 @@ def compute_centroid(feed: "Feed", stop_ids: list[str] | None = None) -> sg.Poin
     if stop_ids is not None:
         g = g.filter(pl.col("stop_id").is_in(stop_ids))
 
-    return sl.from_wkb(g.select(st.geom().st.union_all().st.convex_hull().st.centroid()).head(1).collect().row(0)[0])
+    return sl.from_wkb(
+        g.select(st.geom().st.union_all().st.convex_hull().st.centroid())
+        .head(1)
+        .collect()
+        .row(0)[0]
+    )
 
 
 def restrict_to_trips(feed: "Feed", trip_ids: list[str]) -> "Feed":
@@ -939,18 +944,14 @@ def restrict_to_trips(feed: "Feed", trip_ids: list[str]) -> "Feed":
 
     # transfers (both endpoints must remain)
     if feed.transfers is not None:
-        feed.transfers = (
-            feed.transfers
-            .join(
-                stop_ids.rename({"stop_id": "from_stop_id"}),
-                on="from_stop_id",
-                how="semi",
-            )
-            .join(
-                stop_ids.rename({"stop_id": "to_stop_id"}),
-                on="to_stop_id",
-                how="semi",
-            )
+        feed.transfers = feed.transfers.join(
+            stop_ids.rename({"stop_id": "from_stop_id"}),
+            on="from_stop_id",
+            how="semi",
+        ).join(
+            stop_ids.rename({"stop_id": "to_stop_id"}),
+            on="to_stop_id",
+            how="semi",
         )
 
     return feed
@@ -962,7 +963,11 @@ def restrict_to_routes(feed: "Feed", route_ids: list[str]) -> "Feed":
     the trips with the given route IDs.
     Return the resulting feed.
     """
-    trip_ids = feed.trips.filter(pl.col("route_id").is_in(route_ids)).collect()["trip_id"].to_list()
+    trip_ids = (
+        feed.trips.filter(pl.col("route_id").is_in(route_ids))
+        .collect()["trip_id"]
+        .to_list()
+    )
     return restrict_to_trips(feed, trip_ids)
 
 
@@ -972,7 +977,11 @@ def restrict_to_agencies(feed: "Feed", agency_ids: list[str]) -> "Feed":
     the routes with the given agency IDs.
     Return the resulting feed.
     """
-    route_ids = feed.routes.filter(pl.col("agency_id").is_in(agency_ids)).collect()["route_id"].to_list()
+    route_ids = (
+        feed.routes.filter(pl.col("agency_id").is_in(agency_ids))
+        .collect()["route_id"]
+        .to_list()
+    )
     return restrict_to_routes(feed, route_ids)
 
 
@@ -987,12 +996,16 @@ def restrict_to_dates(feed: "Feed", dates: list[str]) -> "Feed":
         trip_ids = []
     else:
         # Get every trip that is active on at least one of the dates
-        trip_ids = trip_activity.filter(pl.sum_horizontal(*dates) > 0).collect()["trip_id"].to_list()
+        trip_ids = (
+            trip_activity.filter(pl.sum_horizontal(*dates) > 0)
+            .collect()["trip_id"]
+            .to_list()
+        )
 
     return restrict_to_trips(feed, trip_ids)
 
 
-def restrict_to_area(feed: "Feed", area: st.GeoDataFrame|st.GeoLazyFrame) -> "Feed":
+def restrict_to_area(feed: "Feed", area: st.GeoDataFrame | st.GeoLazyFrame) -> "Feed":
     """
     Build a new feed by restricting this one via :func:`restrict_to_trips`
     and the trips that have at least one stop intersecting the given geotable of
@@ -1005,7 +1018,13 @@ def restrict_to_area(feed: "Feed", area: st.GeoDataFrame|st.GeoLazyFrame) -> "Fe
     stops = get_stops_in_area(feed, area).select("stop_id")
 
     # Get all trips with at least one of those stops
-    trip_ids = feed.stop_times.join(stops, "stop_id", how="semi").select("trip_id").unique().collect()["trip_id"].to_list()
+    trip_ids = (
+        feed.stop_times.join(stops, "stop_id", how="semi")
+        .select("trip_id")
+        .unique()
+        .collect()["trip_id"]
+        .to_list()
+    )
 
     return restrict_to_trips(feed, trip_ids)
 

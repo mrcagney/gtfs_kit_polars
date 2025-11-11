@@ -24,7 +24,7 @@ from . import constants as cs
 
 
 # ------------------------------------
-# (Geo)DataFrame helpers
+# DataFrame/LazyFrame helpers
 # ------------------------------------
 def make_lazy(f: pl.DataFrame | pl.LazyFrame) -> pl.LazyFrame:
     return f if isinstance(f, pl.LazyFrame) else f.lazy()
@@ -222,34 +222,6 @@ def replace_date(
             seconds=pl.col("datetime").dt.second(),
         )
     )
-
-
-def get_max_runs(x) -> np.array:
-    """
-    Given a list of numbers, return a NumPy array of pairs
-    (start index, end index + 1) of the runs of max value.
-
-    Example::
-
-        >>> get_max_runs([7, 1, 2, 7, 7, 1, 2])
-        array([[0, 1],
-               [3, 5]])
-
-    Assume x is not empty.
-    Recipe comes from
-    `Stack Overflow <http://stackoverflow.com/questions/1066758/find-length-of-sequences-of-identical-values-in-a-numpy-array>`_.
-    """
-    # Get 0-1 array where 1 marks the max values of x
-    x = np.array(x)
-    m = np.max(x)
-    y = (x == m) * 1
-    # Bound y by zeros to detect runs properly
-    bounded = np.hstack(([0], y, [0]))
-    # Get 1 at run starts and -1 at run ends
-    diffs = np.diff(bounded)
-    run_starts = np.where(diffs > 0)[0]
-    run_ends = np.where(diffs < 0)[0]
-    return np.array([run_starts, run_ends]).T
 
 
 def is_metric(dist_units: str) -> bool:
@@ -625,7 +597,7 @@ def longest_subsequence(
     return list(indices) if index else [seq[i] for i in indices]
 
 
-def make_ids(n: int, prefix: str = "id_"):
+def make_ids(n: int, prefix: str = "id_") -> list[str]:
     """
     Return a length ``n`` list of unique sequentially labelled strings for use as IDs.
 

@@ -13,7 +13,7 @@ import polars as pl
 
 from . import helpers as hp
 
-# Help mypy but avoid circular imports
+# Help type checkers but avoid circular imports
 if TYPE_CHECKING:
     from .feed import Feed
 

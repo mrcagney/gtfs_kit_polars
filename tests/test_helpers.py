@@ -13,7 +13,6 @@ from gtfs_kit_polars import helpers as gkh
 from .context import cairns, cairns_dates, cairns_trip_stats, gtfs_kit_polars
 
 
-
 def test_are_equal():
     f = pl.DataFrame({"a": [1, 3], "b": [2, 4]})
     assert gkh.are_equal(f, f)
@@ -26,6 +25,7 @@ def test_are_equal():
 
     h = pl.DataFrame({})
     assert not gkh.are_equal(f, h)
+
 
 def test_timestr_to_seconds_0():
     timestr1 = "01:01:01"
@@ -49,28 +49,34 @@ def test_seconds_to_timestr_0():
 
 
 def test_timestr_to_seconds():
-    df = pl.DataFrame({
-        "t": ["00:00:00", "01:02:03", "24:00:00", "27:15:30"]
-    })
+    df = pl.DataFrame({"t": ["00:00:00", "01:02:03", "24:00:00", "27:15:30"]})
     # No mod24
-    out = df.with_columns(sec=gkh.timestr_to_seconds("t")).to_dict(as_series=False)["sec"]
+    out = df.with_columns(sec=gkh.timestr_to_seconds("t")).to_dict(as_series=False)[
+        "sec"
+    ]
     assert out == [0, 3723, 86400, 98130]
 
     # With mod24 -> wrap at 24h
-    out_mod = df.with_columns(sec=gkh.timestr_to_seconds("t", mod24=True)).to_dict(as_series=False)["sec"]
+    out_mod = df.with_columns(sec=gkh.timestr_to_seconds("t", mod24=True)).to_dict(
+        as_series=False
+    )["sec"]
     assert out_mod == [0, 3723, 0, 11730]  # 98130 % 86400 = 11730
 
 
 def test_seconds_to_timestr():
-    df = pl.DataFrame({
-        "s": [0, 3723, 86400, 98130]  # 27:15:30
-    })
+    df = pl.DataFrame(
+        {
+            "s": [0, 3723, 86400, 98130]  # 27:15:30
+        }
+    )
     # No mod24
     out = df.with_columns(t=gkh.seconds_to_timestr("s")).to_dict(as_series=False)["t"]
     assert out == ["00:00:00", "01:02:03", "24:00:00", "27:15:30"]
 
     # With mod24 -> wrap at 24h
-    out_mod = df.with_columns(t=gkh.seconds_to_timestr("s", mod24=True)).to_dict(as_series=False)["t"]
+    out_mod = df.with_columns(t=gkh.seconds_to_timestr("s", mod24=True)).to_dict(
+        as_series=False
+    )["t"]
     assert out_mod == ["00:00:00", "01:02:03", "00:00:00", "03:15:30"]
 
 
@@ -110,6 +116,7 @@ def test_replace_date():
     assert collected["datetime"][0] == dt.datetime(2025, 1, 2, 8, 30, 0)
     assert collected["datetime"][1] == dt.datetime(2025, 1, 2, 9, 45, 15)
 
+
 def test_is_metric():
     assert gkh.is_metric("m")
     assert gkh.is_metric("km")
@@ -124,13 +131,6 @@ def test_get_convert_dist():
     fn = gkh.get_convert_dist(di, do)
     f = pl.DataFrame({"dist": [1]})
     assert f.select(dist=fn("dist"))["dist"].to_list() == [1.609_344]
-
-
-def test_get_max_runs():
-    x = [7, 1, 2, 7, 7, 1, 2]
-    get = gkh.get_max_runs(x)
-    expect = np.array([[0, 1], [3, 5]])
-    assert_array_equal(get, expect)
 
 
 def test_is_not_null():
@@ -232,34 +232,43 @@ def test_combine_time_series():
     t1 = t0 + dt.timedelta(minutes=1)
     idx = [t0, t1]
 
-
     # Indicators (wide frames: columns are entities + 'datetime')
-    num_trips = pl.DataFrame({
-        "datetime": idx,
-        "R1-0": [1, 2],
-        "R1-1": [0, 1],
-    })
-    num_trip_starts = pl.DataFrame({
-        "datetime": idx,
-        "R1-0": [1, 0],
-        "R1-1": [None, 1],  # will coerce None->0
-    })
-    num_trip_ends = pl.DataFrame({
-        "datetime": idx,
-        "R1-0": [0, 1],
-        "R1-1": [0, 0],
-    })
+    num_trips = pl.DataFrame(
+        {
+            "datetime": idx,
+            "R1-0": [1, 2],
+            "R1-1": [0, 1],
+        }
+    )
+    num_trip_starts = pl.DataFrame(
+        {
+            "datetime": idx,
+            "R1-0": [1, 0],
+            "R1-1": [None, 1],  # will coerce None->0
+        }
+    )
+    num_trip_ends = pl.DataFrame(
+        {
+            "datetime": idx,
+            "R1-0": [0, 1],
+            "R1-1": [0, 0],
+        }
+    )
     # Distance/duration chosen so speed = 2.0 where duration>0
-    service_distance = pl.DataFrame({
-        "datetime": idx,
-        "R1-0": [0.5, 0.5],
-        "R1-1": [0.0, 1.0],
-    })
-    service_duration = pl.DataFrame({
-        "datetime": idx,
-        "R1-0": [0.25, 0.25],
-        "R1-1": [0.0, 0.5],
-    })
+    service_distance = pl.DataFrame(
+        {
+            "datetime": idx,
+            "R1-0": [0.5, 0.5],
+            "R1-1": [0.0, 1.0],
+        }
+    )
+    service_duration = pl.DataFrame(
+        {
+            "datetime": idx,
+            "R1-0": [0.25, 0.25],
+            "R1-1": [0.0, 0.5],
+        }
+    )
 
     series_by_indicator = {
         "num_trips": num_trips,
@@ -319,16 +328,15 @@ def test_combine_time_series():
     # Check a bin with duration==0 (should be 0.0): t0, dir 1 -> 0.0 / 0.0 -> 0.0 after fill
     assert row_t0_dir1["service_speed"] == 0.0
 
+
 def test_downsample():
-    ts = cairns.compute_network_time_series(
-        cairns_dates, num_minutes=60
-    ).collect()
+    ts = cairns.compute_network_time_series(cairns_dates, num_minutes=60).collect()
     f = gkh.downsample(ts, num_minutes=60).collect()
     assert ts.equals(f)
 
-    f = gkh.downsample(ts, num_minutes=3*60).collect()
+    f = gkh.downsample(ts, num_minutes=3 * 60).collect()
 
     # Should have correct num rows
     assert f.height == ts.height / 3
     # Should have correct frequency
-    assert gkh.get_bin_size(f) == 3*60
+    assert gkh.get_bin_size(f) == 3 * 60

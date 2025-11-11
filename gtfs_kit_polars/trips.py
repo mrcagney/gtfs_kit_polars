@@ -20,7 +20,7 @@ import shapely.ops as so
 from . import constants as cs
 from . import helpers as hp
 
-# Help mypy but avoid circular imports
+# Help type checkers but avoid circular imports
 if TYPE_CHECKING:
     from .feed import Feed
 

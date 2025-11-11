@@ -1,14 +1,18 @@
-GTFS Kit Next
-**************
+GTFS Kit Polars
+***************
 .. image:: https://github.com/mrcagney/gtfs_kit_polars/actions/workflows/test.yml/badge.svg
 
-GTFS Kit Next is a Python 3.12+ library for analyzing `General Transit Feed Specification (GTFS) <https://en.wikipedia.org/wiki/GTFS>`_ data in memory without a database.
-It uses Polars and Polars ST to do the heavy lifting.
+GTFS Kit Polars is a Python 3.12+ library for analyzing `General Transit Feed Specification (GTFS) <https://en.wikipedia.org/wiki/GTFS>`_ data.
+It uses Polars and Polars ST LazyFrames to do the heavy lifting.
+
+The functions and methods of GTFS Kit Polars assume a valid GTFS feed but offer no
+validation, because validation is complex and already solved by dedicated libraries.
+So unless you know what you're doing, use the `Canonical GTFS Validator <https://gtfs-validator.mobilitydata.org/>`_ before seriously analyzing a feed with this library.
 
 
 Installation
 =============
-Install it from PyPI with UV, say, via ``uv add gtfs_kit_polars_next``.
+Install it from PyPI with UV, say, via ``uv add gtfs_kit_polars``.
 
 
 Examples
@@ -18,24 +22,38 @@ In the Marimo notebook ``notebooks/examples.py``.
 
 Authors
 =========
-- Alex Raichev (2019-09), maintainer
+- Alex Raichev (2025-XX), maintainer
 
 
 Progress
 =========
-Progress porting the Pandas original to Polars.
+Progress on porting the Pandas original to Polars.
 
-[x] calendar.py
-[x] cleaners.py
-[x] constants.py
-[x] feed.py
-[x] helpers.py
-[x] miscellany.py
-[x] routes.py
-[x] shapes.py
-[x] stop_times.py
-[x] stops.py
-[x] trips.py
+[x] Update code
+  [x] calendar.py
+  [x] cleaners.py
+  [x] constants.py
+  [x] feed.py
+  [x] helpers.py
+  [x] miscellany.py
+  [x] routes.py
+  [x] shapes.py
+  [x] stop_times.py
+  [x] stops.py
+  [x] trips.py
+[] Doublecheck typehints and docstrings
+  [] calendar.py
+  [] cleaners.py
+  [] constants.py
+  [] feed.py
+  [] helpers.py
+  [] miscellany.py
+  [] routes.py
+  [] shapes.py
+  [] stop_times.py
+  [] stops.py
+  [] trips.py
+[] Doublecheck `examples.py`
 
 Notes
 =====

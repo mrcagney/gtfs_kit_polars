@@ -7,12 +7,13 @@ import polars as pl
 
 from .context import DATA_DIR
 from gtfs_kit_polars import feed as gkf
-from gtfs_kit_polars import constants as cs
+from gtfs_kit_polars import helpers as gkh
+from gtfs_kit_polars import constants as gkc
 
 
 def test_feed():
     feed = gkf.Feed(agency=pl.DataFrame(), dist_units="km")
-    for key in cs.FEED_ATTRS:
+    for key in gkc.FEED_ATTRS:
         val = getattr(feed, key)
         if key == "dist_units":
             assert val == "km"
@@ -62,7 +63,7 @@ def test_copy():
     feed1 = gkf.read_feed(DATA_DIR / "sample_gtfs.zip", dist_units="km")
     feed2 = feed1.copy()
 
-    for key in cs.FEED_ATTRS:
+    for key in gkc.FEED_ATTRS:
         v = getattr(feed2, key)
         w = getattr(feed1, key)
         if isinstance(v, pl.LazyFrame):
@@ -80,9 +81,9 @@ def test_list_feed():
 
     for path in [DATA_DIR / "sample_gtfs.zip", DATA_DIR / "sample_gtfs"]:
         f = gkf.list_feed(path)
-        assert isinstance(f, pl.DataFrame)
+        assert isinstance(f, pl.LazyFrame)
         assert set(f.collect_schema().names()) == {"file_name", "file_size"}
-        assert f.shape[0] in [12, 13]
+        assert gkh.height(f) in [12, 13]
 
 
 def test_read_feed():

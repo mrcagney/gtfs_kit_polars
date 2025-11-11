@@ -1,13 +1,10 @@
 """
 This module defines a Feed class to represent GTFS feeds.
-There is an instance attribute for every GTFS table (routes, stops, etc.),
-which stores the table as a Pandas DataFrame,
-or as ``None`` in case that table is missing.
 
 The Feed class also has heaps of methods: a method to compute route stats,
 a method to compute screen line counts, validations methods, etc.
-To ease reading, almost all of these methods are defined in other modules and
-grouped by theme (``routes.py``, ``stops.py``, etc.).
+To ease testing and reading, almost all of these methods are defined in other modules
+and grouped by theme (``routes.py``, ``stops.py``, etc.).
 These methods, or rather functions that operate on feeds, are
 then imported within the Feed class.
 This separation of methods unfortunately messes up slightly the ``Feed`` class
@@ -34,17 +31,17 @@ from . import helpers as hp
 
 class Feed(object):
     """
-    An instance of this class represents a not-necessarily-valid GTFS feed,
-    where GTFS tables are stored as DataFrames.
-    Beware that the stop times DataFrame can be big (several gigabytes),
-    so make sure you have enough memory to handle it.
+    An instance of this class represents a GTFS feed,
+    where GTFS tables are stored as Polars LazyFrame and are coerced to such upon
+    initialization and attribute updates.
+    The methods assume the instance represents a valid GTFS feed but offer no
+    validation, because that's complex and already done by dedicated libraries.
+    So unless you know what you're doing, use
+    the `Canonical GTFS Validator <https://gtfs-validator.mobilitydata.org/>`_
+    before seriously analyzing a feed with this class.
 
-    Primary instance attributes:
+    GTFS table instance attributes:
 
-    - ``dist_units``: a string in :const:`.constants.DIST_UNITS`;
-      specifies the distance units of the `shape_dist_traveled` column values,
-      if present; also effects whether to display trip and route stats in
-      metric or imperial units
     - ``agency``
     - ``stops``
     - ``routes``
@@ -60,25 +57,17 @@ class Feed(object):
     - ``feed_info``
     - ``attributions``
 
-    There are also a few secondary instance attributes that are derived
-    from the primary attributes and are automatically updated when the
-    primary attributes change.
-    For this to work, you must update the primary attributes like this (good)::
+    Metadata attributes:
 
-        feed.trips['route_short_name'] = 'bingo'
-        feed.trips = feed.trips
-
-    and not like this (bad)::
-
-        feed.trips['route_short_name'] = 'bingo'
-
-    The first way ensures that the altered trips DataFrame is saved as
-    the new ``trips`` attribute, but the second way does not.
+    - ``dist_units``: a string in :const:`.constants.DIST_UNITS`;
+      specifies the distance units of the `shape_dist_traveled` column values,
+      if present; also effects whether to display trip and route stats in
+      metric or imperial units
+    - ``unzip_dir``: temporary file directory for unzipping feeds read from ZIP file
 
     """
 
-    # Import heaps of methods from modules split by functionality;
-    # i learned this trick from
+    # Import heaps of methods from modules split by functionality, a trick taken from
     # https://groups.google.com/d/msg/comp.lang.python/goLBrqcozNY/DPgyaZ6gAwAJ
     from .calendar import get_dates, get_first_week, get_week, subset_dates
     from .cleaners import (
@@ -178,34 +167,45 @@ class Feed(object):
         unzip_dir: tempfile.TemporaryDirectory | None = None,
     ):
         """
-        Assume that every non-None input is a DataFrame,
-        except for ``dist_units`` which should be a string in
-        :const:`.constants.DIST_UNITS`.
+        Upon initialization and later attribute updates,
+        check that ``dist_units`` lies in :const:`.constants.DIST_UNITS`,
+        and coerce every non-None table to a LazyFrame.
 
         No other format checking is performed.
         In particular, a Feed instance need not represent a valid GTFS
         feed.
         """
-        # Set primary attributes from inputs.
-        # The @property magic below will then
-        # validate some and set some derived attributes
+        # Set attributes from inputs.
+        # The @property magic below will handle updates to ``dist_units``, and
+        # __setattr__ will handle updates to tables.
         for prop, val in locals().items():
             if prop in cs.FEED_ATTRS:
-                if prop not in {"dist_units", "unzip_dir"} and val is not None:
-                    # Coerce to lazy frame
-                    setattr(self, prop, hp.make_lazy(val))
-                else:
-                    setattr(self, prop, val)
+                setattr(self, prop, val)
+
+    def __setattr__(
+        self: "Feed", name: str, value: pl.DataFrame | pl.LazyFrame
+    ) -> None:
+        """
+        Coerce GTFS tables to LazyFrames.
+        """
+        if (
+            name in cs.FEED_ATTRS
+            and name not in {"dist_units", "unzip_dir"}
+            and value is not None
+        ):
+            value = hp.make_lazy(value)
+
+        super().__setattr__(name, value)
 
     @property
-    def dist_units(self):
+    def dist_units(self: "Feed") -> str:
         """
         The distance units of the Feed.
         """
         return self._dist_units
 
     @dist_units.setter
-    def dist_units(self, val):
+    def dist_units(self: "Feed", val: str) -> None:
         if val not in cs.DIST_UNITS:
             raise ValueError(
                 f"Distance units are required and must lie in {cs.DIST_UNITS}"
@@ -213,7 +213,7 @@ class Feed(object):
         else:
             self._dist_units = val
 
-    def __str__(self) -> str:
+    def __str__(self: "Feed") -> str:
         """
         Print the first five rows of each GTFS table.
         """
@@ -227,7 +227,7 @@ class Feed(object):
 
         return "\n".join([f"* {k} --------------------\n\t{v}" for k, v in d.items()])
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self: "Feed", other: "Feed") -> bool:
         """
         Define two feeds be equal if and only if their
         feed attributes, excluding ``unzip_dir``, are equal.
@@ -250,7 +250,7 @@ class Feed(object):
                     return False
         return True
 
-    def copy(self) -> "Feed":
+    def copy(self: "Feed") -> "Feed":
         """
         Return a copy of this feed, that is, a feed with all the same
         attributes.
@@ -263,7 +263,7 @@ class Feed(object):
             setattr(other, key, value)
         return other
 
-    def to_file(self, path: pb.Path, ndigits: int | None = None) -> None:
+    def to_file(self: "Feed", path: pb.Path, ndigits: int | None = None) -> None:
         """
         Write this Feed to the given path.
         If the path ends in '.zip', then write the feed as a zip archive.

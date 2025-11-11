@@ -145,6 +145,10 @@ DIST_UNITS = ["ft", "mi", "m", "km"]
 
 #: Feed attributes
 FEED_ATTRS = [
+    # Metadata
+    "dist_units",
+    "unzip_dir",
+    # GTFS tables
     "agency",
     "attributions",
     "calendar",
@@ -159,8 +163,6 @@ FEED_ATTRS = [
     "stop_times",
     "trips",
     "transfers",
-    "dist_units",
-    "unzip_dir",
 ]
 
 #: WGS84 coordinate reference system (used by spatial ops)
