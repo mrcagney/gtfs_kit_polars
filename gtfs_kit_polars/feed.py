@@ -349,7 +349,7 @@ def list_feed(path: pb.Path) -> pl.DataFrame:
             if x.is_file():
                 rows.append({"file_name": x.name, "file_size": x.stat().st_size})
 
-    return pl.DataFrame(rows)
+    return pl.LazyFrame(rows)
 
 
 def _read_feed_from_path(path: pb.Path, dist_units: str) -> "Feed":
