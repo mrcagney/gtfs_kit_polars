@@ -56,5 +56,5 @@ markers = [
 [tool.ruff]
 # Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.
 lint.select = ["E", "F"]
-lint.ignore = ["E501", "E731", "F401", "F403"]
+lint.ignore = ["E501", "E731", "F403"]
 exclude = ["notebooks/*.py"]

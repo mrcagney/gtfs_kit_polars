@@ -326,7 +326,7 @@ def list_feed(path: pb.Path) -> pl.DataFrame:
     """
     Given a path (string or Path object) to a GTFS zip file or
     directory, record the file names and file sizes of the contents,
-    and return the result in a DataFrame with the columns:
+    and return the result in a table with the columns:
 
     - ``'file_name'``
     - ``'file_size'``
@@ -370,7 +370,7 @@ def _read_feed_from_path(path: pb.Path, dist_units: str) -> "Feed":
     if not path.exists():
         raise ValueError(f"Path {path} does not exist")
 
-    # Read files into feed dictionary of DataFrames
+    # Read files into feed dictionary of tables
     feed_dict = {table: None for table in cs.DTYPES} | {"unzip_dir": None}
 
     # Unzip path to temporary directory if necessary

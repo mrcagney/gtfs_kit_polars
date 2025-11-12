@@ -4,11 +4,9 @@ Functions about stop times.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
-import pandas as pd
 import polars as pl
 
 from . import helpers as hp

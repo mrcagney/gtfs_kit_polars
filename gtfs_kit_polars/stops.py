@@ -4,17 +4,12 @@ Functions about stops.
 
 from __future__ import annotations
 
-import json
-from collections import Counter
 from typing import TYPE_CHECKING, Iterable
 
 import folium as fl
 import folium.plugins as fp
 import polars as pl
 import polars_st as st
-import geopandas as gpd
-import numpy as np
-import pandas as pd
 
 from . import constants as cs
 from . import helpers as hp
@@ -36,7 +31,7 @@ STOP_STYLE = {
 
 def geometrize_stops(
     stops: pl.DataFrame | pl.LazyFrame, *, use_utm: bool = False
-) -> pl.DataFrame | pl.LazyFrame:
+) -> st.GeoDataFrame | st.GeoLazyFrame:
     """
     Given a GTFS stops Table, convert it to a geotable with a "geometry"
     column of LineStrings and a "srid" column with the (constant) srid of the geographic
@@ -56,12 +51,12 @@ def geometrize_stops(
 
 
 def ungeometrize_stops(
-    stops_g: pl.DataFrame | pl.LazyFrame,
+    stops_g: st.GeoDataFrame | st.GeoLazyFrame,
 ) -> pl.DataFrame | pl.LazyFrame:
     """
     The inverse of :func:`geometrize_stops`.
 
-    If ``stops_g`` is in UTM coordinates (has a UTM srid property),
+    If ``stops_g`` is in UTM coordinates,
     then convert those UTM coordinates back to WGS84 coordinates,
     which is the standard for a GTFS shapes table.
     """
@@ -95,9 +90,9 @@ def get_stops(
     to stops visited by those routes.
     If ``in_stations``, then subset further stops in stations if station data
     is available.
-    If ``as_geo``, then return the result as a GeoDataFrame with a 'geometry'
+    If ``as_geo``, then return the result as a geotable with a 'geometry'
     column of points instead of 'stop_lat' and 'stop_lon' columns.
-    The GeoDataFrame will have a UTM CRS if ``use_utm`` and a WGS84 CRS otherwise.
+    The geotable will have a UTM SRID if ``use_utm`` and a WGS84 SRID otherwise.
     """
     s = feed.stops
 
@@ -142,7 +137,7 @@ def get_stops(
     return s
 
 
-def compute_stop_activity(feed: "Feed", dates: list[str]) -> pd.DataFrame:
+def compute_stop_activity(feed: "Feed", dates: list[str]) -> pl.LazyFrame:
     """
     Mark stops as active or inactive on the given dates (YYYYMMDD date strings).
     A stop is *active* on a given date if some trips that starts on the
@@ -180,7 +175,7 @@ def build_stop_timetable(feed: "Feed", stop_id: str, dates: list[str]) -> pl.Laz
     """
     Return a timetable for the given stop ID and dates (YYYYMMDD date strings)
 
-    Return a DataFrame whose columns are all those in ``feed.trips`` plus those in
+    Return a table whose columns are all those in ``feed.trips`` plus those in
     ``feed.stop_times`` plus ``'date'``, and the stop IDs are restricted to the given
     stop ID.
     The result is sorted by date then departure time.
@@ -430,7 +425,7 @@ def compute_stop_stats(
     headway_end_time: str = "19:00:00",
     *,
     split_directions: bool = False,
-) -> pd.DataFrame:
+) -> pl.LazyFrame:
     """
     Compute stats for all stops for the given dates (YYYYMMDD date strings).
     Optionally, restrict to the stop IDs given.
@@ -440,7 +435,7 @@ def compute_stop_stats(
     Use the headway start and end times to specify the time period for computing
     headway stats.
 
-    Return a DataFrame with the columns
+    Return a table with the columns
 
     - ``'date'``
     - ``'stop_id'``
@@ -461,7 +456,7 @@ def compute_stop_stats(
     - ``'end_time'``: latest departure time of a trip from this stop on
       the date
 
-    Exclude dates with no active stops, which could yield the empty DataFrame.
+    Exclude dates with no active stops, which could yield the empty table.
     """
     dates = feed.subset_dates(dates)
     null_stats = compute_stop_stats_0(
@@ -538,7 +533,7 @@ def compute_stop_time_series_0(
     If ``split_directions``, then separate each stop's stats by trip direction.
     Use the given YYYYMMDD date label as the date in the time series.
 
-    Return a long-format DataFrame with columns
+    Return a long-format table with columns
 
     - ``datetime``: datetime object for the given date and frequency chunks
     - ``stop_id``
@@ -555,7 +550,7 @@ def compute_stop_time_series_0(
       so routes with trips that end past 23:59:59 will have all
       their stats wrap around to the early morning of the time series.
     - 'num_trips' should be resampled by summing
-    - If ``trips_subset`` is empty, then return an empty DataFrame
+    - If ``trips_subset`` is empty, then return an empty table
     - Raise a ValueError if ``split_directions`` and no non-null
       direction ID values present
 
@@ -659,7 +654,7 @@ def compute_stop_time_series(
 
     Exclude dates that lie outside of the Feed's date range.
     If all dates lie outside the Feed's date range, then return an
-    empty DataFrame
+    empty table
 
     If ``split_directions``, then separate the stop stats by direction (0 or 1)
     of the trips visiting the stops.

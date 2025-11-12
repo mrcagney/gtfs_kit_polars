@@ -4,7 +4,6 @@ Functions useful across modules.
 
 from __future__ import annotations
 
-import copy
 import datetime as dt
 import functools as ft
 import math
@@ -13,11 +12,8 @@ from functools import cmp_to_key
 from typing import Callable, Literal
 
 import json2html as j2h
-import numpy as np
-import pandas as pd
 import polars as pl
 import polars_st as st
-import shapely.geometry as sg
 import utm
 
 from . import constants as cs
@@ -46,7 +42,7 @@ def height(f: pl.DataFrame | pl.LazyDataFrame) -> int:
 
 def is_not_null(f: pl.DataFrame | pl.LazyFrame, col_name: str) -> bool:
     """
-    Return ``True`` if the given DataFrame has a column of the given
+    Return ``True`` if the given table has a column of the given
     name (string), and there exists at least one non-NaN value in that
     column; return ``False`` otherwise.
     """
@@ -232,7 +228,7 @@ def is_metric(dist_units: str) -> bool:
     return dist_units in ["m", "km"]
 
 
-def get_convert_dist(dist_units_in: str, dist_units_out: str):
+def get_convert_dist(dist_units_in: str, dist_units_out: str) -> Callable:
     """
     Return a *Polars expression builder* for distance conversion:
 

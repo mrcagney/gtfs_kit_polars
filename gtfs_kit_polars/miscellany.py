@@ -6,9 +6,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import geopandas as gpd
-import numpy as np
-import pandas as pd
 import polars as pl
 import polars_st as st
 import shapely as sl
@@ -24,10 +21,10 @@ if TYPE_CHECKING:
 
 def list_fields(feed: "Feed", table_name: str | None = None) -> pl.LazyFrame:
     """
-    Return a DataFrame summarizing all GTFS tables in the given feed
+    Return a table summarizing all GTFS tables in the given feed
     or in the given table name if specified.
 
-    The resulting DataFrame has the following columns.
+    The resulting table has the following columns.
 
     - ``'table'``: name of the GTFS table, e.g. ``'stops'``
     - ``'column'``: name of a column in the table,
@@ -40,7 +37,7 @@ def list_fields(feed: "Feed", table_name: str | None = None) -> pl.LazyFrame:
     - ``'min_value'``: minimum value in the column
     - ``'max_value'``: maximum value in the column
 
-    If the table is not in the feed, then return an empty DataFrame
+    If the table is not in the feed, then return an empty table
     If the table is not valid, raise a ValueError
     """
     gtfs_tables = list(cs.DTYPES.keys())
@@ -94,14 +91,14 @@ def list_fields(feed: "Feed", table_name: str | None = None) -> pl.LazyFrame:
     return pl.concat(frames, how="vertical") if frames else pl.LazyFrame(schema=schema)
 
 
-def describe(feed: "Feed", sample_date: str | None = None) -> pd.LazyFrame:
+def describe(feed: "Feed", sample_date: str | None = None) -> pl.LazyFrame:
     """
-    Return a DataFrame of various feed indicators and values,
+    Return a table of various feed indicators and values,
     e.g. number of routes.
     Specialize some those indicators to the given YYYYMMDD sample date string,
     e.g. number of routes active on the date.
 
-    The resulting DataFrame has the columns
+    The resulting table has the columns
 
     - ``'indicator'``: string; name of an indicator, e.g. 'num_routes'
     - ``'value'``: value of the indicator, e.g. 27
@@ -139,12 +136,12 @@ def describe(feed: "Feed", sample_date: str | None = None) -> pd.LazyFrame:
     )
 
 
-def assess_quality(feed: "Feed") -> pd.DataFrame:
+def assess_quality(feed: "Feed") -> pl.LazyFrame:
     """
-    Return a DataFrame of various feed indicators and values,
+    Return a table of various feed indicators and values,
     e.g. number of trips missing shapes.
 
-    The resulting DataFrame has the columns
+    The resulting table has the columns
 
     - ``'indicator'``: string; name of an indicator, e.g. 'num_routes'
     - ``'value'``: value of the indicator, e.g. 27
@@ -336,7 +333,7 @@ def convert_dist(feed: "Feed", new_dist_units: str) -> "Feed":
 
 
 def compute_network_stats_0(
-    stop_times: pd.DataFrame | pl.LazyFrame,
+    stop_times: pl.DataFrame | pl.LazyFrame,
     trip_stats: pl.DataFrame | pl.LazyFrame,
     *,
     split_route_types=False,
@@ -373,7 +370,7 @@ def compute_network_stats_0(
     - ``'service_speed'``: service_distance/service_duration on the
       date
 
-    Exclude dates with no active stops, which could yield the empty DataFrame.
+    Exclude dates with no active stops, which could yield the empty table.
 
     Helper function for :func:`compute_network_stats`.
     """
@@ -533,7 +530,7 @@ def compute_network_stats(
     - ``'service_speed'``: service_distance/service_duration on the
       date
 
-    Exclude dates with no active stops, which could yield the empty DataFrame.
+    Exclude dates with no active stops, which could yield the empty table.
 
     The route and trip stats for date d contain stats for trips that
     start on date d only and ignore trips that start on date d-1 and
@@ -560,7 +557,7 @@ def compute_network_stats(
     # memoizing stats the sequence of trip IDs active on the date
     # to avoid unnecessary recomputations.
     # Store in a dictionary of the form
-    # trip ID sequence -> stats DataFrame.
+    # trip ID sequence -> stats table.
     trip_stats = (
         hp.make_lazy(trip_stats)
         if trip_stats is not None
@@ -571,7 +568,7 @@ def compute_network_stats(
     # memoizing stats the sequence of trip IDs active on the date
     # to avoid unnecessary recomputations.
     # Store in a dictionary of the form
-    # trip ID sequence -> stats DataFrame.
+    # trip ID sequence -> stats table.
     stats_by_ids = {}
     activity = feed.compute_trip_activity(dates)
     frames = []
@@ -644,7 +641,7 @@ def compute_network_time_series(
 
     Exclude dates that lie outside of the Feed's date range.
     If all the dates given lie outside of the Feed's date range,
-    then return an empty DataFrame with the specified columns.
+    then return an empty table with the specified columns.
 
     Notes
     -----
@@ -1029,60 +1026,6 @@ def restrict_to_area(feed: "Feed", area: st.GeoDataFrame | st.GeoLazyFrame) -> "
     return restrict_to_trips(feed, trip_ids)
 
 
-def _reshape_stop_times(stop_times: pd.DataFrame) -> pd.DataFrame:
-    """
-    Given a GTFS stop times DataFrame, reshape it to have only the following columns.
-
-    - trip_id
-    - stop_sequence
-    - from_departure_time
-    - to_departure_time
-    - from_stop_id
-    - to_stop_id
-    - from_shape_dist_traveled (optional): present if and only if
-      'shape_dist_traveled' column present in given stop times
-    - to_shape_dist_traveled (optional): present if and only if 'shape_dist_traveled'
-      column present in given stop times
-
-    This is a helper function for :func:`compute_screen_line_counts`.
-    """
-    f = stop_times.sort_values(["trip_id", "stop_sequence"], ignore_index=True)
-    g = f.groupby("trip_id")
-
-    has_dist = "shape_dist_traveled" in f.columns
-
-    # For each trip, create shifted columns for the "to" stop and its associated time and distance fields
-    f["to_stop_id"] = g["stop_id"].shift(-1)
-    f["to_departure_time"] = g["departure_time"].shift(-1)
-    if has_dist:
-        f["to_shape_dist_traveled"] = g["shape_dist_traveled"].shift(-1)
-
-    # Drop rows where there is no "to" stop (i.e. the last stop in each trip)
-    f = f.dropna(subset=["to_stop_id"])
-
-    # Rename the original columns to reflect they represent the "from" stop in the segment
-    f = f.rename(
-        columns={
-            "stop_id": "from_stop_id",
-            "departure_time": "from_departure_time",
-            "shape_dist_traveled": "from_shape_dist_traveled",
-        }
-    )
-
-    return f.filter(
-        [
-            "trip_id",
-            "stop_sequence",
-            "from_departure_time",
-            "to_departure_time",
-            "from_stop_id",
-            "to_stop_id",
-            "from_shape_dist_traveled",
-            "to_shape_dist_traveled",
-        ]
-    )
-
-
 def compute_screen_line_counts(
     feed: "Feed",
     screen_lines: st.GeoLazyFrame | st.GeoDataFrame,
@@ -1099,7 +1042,7 @@ def compute_screen_line_counts(
     case of non-simple (self-intersecting) shapes.
 
     For each trip crossing a screen line,
-    compute the crossing time, crossing direction, etc. and return a DataFrame
+    compute the crossing time, crossing direction, etc. and return a table
     of results with the columns
 
     - ``'date'``: the YYYYMMDD date string given
@@ -1134,7 +1077,7 @@ def compute_screen_line_counts(
 
     Notes:
 
-    - Assume the Feed's stop times DataFrame has an accurate ``shape_dist_traveled``
+    - Assume the Feed's stop times table has an accurate ``shape_dist_traveled``
       column.
     - Assume that trips travel in the same direction as their shapes, an assumption
       that is part of the GTFS.

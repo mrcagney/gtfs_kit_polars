@@ -5,13 +5,9 @@ Functions about routes.
 from __future__ import annotations
 
 import datetime as dt
-import json
 from typing import TYPE_CHECKING, Iterable
 
 import folium as fl
-import geopandas as gpd
-import numpy as np
-import pandas as pd
 import polars as pl
 import polars_st as st
 import shapely.geometry as sg
@@ -33,7 +29,7 @@ def get_routes(
     as_geo: bool = False,
     use_utm: bool = False,
     split_directions: bool = False,
-) -> pl.LazyFrame:
+) -> pl.LazyFrame | st.GeoLazyFrame:
     """
     Return ``feed.routes`` or a subset thereof.
     If a YYYYMMDD date string is given, then restrict routes to only those active on
@@ -89,11 +85,11 @@ def get_routes(
 
 def build_route_timetable(
     feed: "Feed", route_id: str, dates: list[str]
-) -> pl.DataFrame:
+) -> pl.LazyFrame:
     """
     Return a timetable for the given route and dates (YYYYMMDD date strings).
 
-    Return a DataFrame with whose columns are all those in ``feed.trips`` plus those in
+    Return a table with whose columns are all those in ``feed.trips`` plus those in
     ``feed.stop_times`` plus ``'date'``.
     The trip IDs are restricted to the given route ID.
     The result is sorted first by date and then by grouping by
@@ -102,7 +98,7 @@ def build_route_timetable(
     Skip dates outside of the Feed's dates.
 
     If there is no route activity on the given dates, then return
-    an empty DataFrame.
+    an empty table.
     """
     dates = feed.subset_dates(dates)
     if not dates:
@@ -549,7 +545,7 @@ def compute_route_stats(
     Use the headway start and end times to specify the time period for computing
     headway stats.
 
-    Return a DataFrame with the columns
+    Return a table with the columns
 
     - ``'date'``
     - ``'route_id'``
@@ -595,7 +591,7 @@ def compute_route_stats(
     - ``'mean_trip_duration'``: service_duration/num_trips
 
 
-    Exclude dates with no active trips, which could yield the empty DataFrame.
+    Exclude dates with no active trips, which could yield an empty table.
 
     If not ``split_directions``, then compute each route's stats,
     except for headways, using its trips running in both directions.
@@ -636,7 +632,7 @@ def compute_route_stats(
     # memoizing stats the sequence of trip IDs active on the date
     # to avoid unnecessary recomputations.
     # Store in a dictionary of the form
-    # trip ID sequence -> stats DataFrame.
+    # trip ID sequence -> stats table.
     stats_by_ids = {}
     activity = feed.compute_trip_activity(dates)
     frames = []
@@ -691,7 +687,7 @@ def compute_route_time_series_0(
     If ``split_directions``, then separate each routes's stats by trip direction.
     Use the given YYYYMMDD date label as the date in the time series index.
 
-    Return a long-format DataFrame with the columns
+    Return a long-format table with the columns
 
     - ``datetime``: datetime object
     - ``route_id``
@@ -887,7 +883,7 @@ def compute_route_time_series(
 
     Exclude dates that lie outside of the Feed's date range.
     If all dates lie outside the Feed's date range, then return an
-    empty DataFrame.
+    empty table.
 
     Notes
     -----

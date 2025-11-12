@@ -42,11 +42,11 @@ Progress on porting the Pandas original to Polars.
   [x] stops.py
   [x] trips.py
 [] Doublecheck typehints and docstrings
-  [] calendar.py
-  [] cleaners.py
-  [] constants.py
-  [] feed.py
-  [] helpers.py
+  [x] calendar.py
+  [x] cleaners.py
+  [x] constants.py
+  [x] feed.py
+  [x] helpers.py
   [] miscellany.py
   [] routes.py
   [] shapes.py
@@ -54,6 +54,7 @@ Progress on porting the Pandas original to Polars.
   [] stops.py
   [] trips.py
 [] Doublecheck `examples.py`
+[] Describe motivation and limitations in docs
 
 Notes
 =====

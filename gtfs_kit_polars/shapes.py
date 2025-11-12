@@ -4,14 +4,12 @@ Functions about shapes.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Iterable
 
 import polars as pl
 import polars_st as st
 import shapely as sl
 import shapely.geometry as sg
-import shapely.ops as so
 
 from . import constants as cs
 from . import helpers as hp
@@ -74,7 +72,7 @@ def geometrize_shapes(
     shapes: pl.DataFrame | pl.LazyFrame, *, use_utm: bool = False
 ) -> st.GeoLazyFrame:
     """
-    Given a GTFS shapes DataFrame, convert it to a GeoDataFrame of LineStrings
+    Given a GTFS shapes table, convert it to a geotable of LineStrings
     and return the result, which will no longer have the columns
     ``'shape_pt_sequence'``, ``'shape_pt_lon'``,
     ``'shape_pt_lat'``, and ``'shape_dist_traveled'``.
@@ -147,12 +145,12 @@ def get_shapes(
     feed: "Feed", *, as_geo: bool = False, use_utm: bool = False
 ) -> pl.LazyFrame | None:
     """
-    Get the shapes DataFrame for the given feed, which could be ``None``.
-    If ``as_geo``, then return it as GeoDataFrame with a 'geometry' column
+    Get the shapes table for the given feed, which could be ``None``.
+    If ``as_geo``, then return it as geotable with a 'geometry' column
     of LineStrings and no 'shape_pt_sequence', 'shape_pt_lon', 'shape_pt_lat',
     'shape_dist_traveled' columns.
-    The GeoDataFrame will have a UTM CRS if ``use_utm``; otherwise it will have a
-    WGS84 CRS.
+    The geotable will have a UTM SRID if ``use_utm``; otherwise it will have a
+    WGS84 SRID.
     """
     f = feed.shapes
     if f is not None and as_geo:
@@ -218,7 +216,7 @@ def get_shapes_intersecting_geometry(
     Otherwise, return the subset of ``feed.shapes`` that contains all shapes that
     intersect the given Shapely WGS84 geometry, e.g. a Polygon or LineString.
 
-    If ``as_geo``, then return the shapes as a GeoDataFrame.
+    If ``as_geo``, then return the shapes as a geotable.
     Specifying ``shapes_g`` will skip the first step of the
     algorithm, namely, geometrizing ``feed.shapes``.
     """

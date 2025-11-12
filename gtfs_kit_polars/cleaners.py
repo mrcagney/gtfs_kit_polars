@@ -456,7 +456,7 @@ def clean(feed: "Feed") -> "Feed":
 
 def drop_invalid_columns(feed: "Feed") -> "Feed":
     """
-    Drop all DataFrame columns of the given Feed that are not
+    Drop all table columns of the given Feed that are not
     listed in the GTFS.
     Return the resulting Feed.
     """

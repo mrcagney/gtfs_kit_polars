@@ -6,14 +6,12 @@ from __future__ import annotations
 
 import datetime as dt
 import functools as ft
-import json
 from typing import TYPE_CHECKING, Iterable
 
 import folium as fl
 import folium.plugins as fp
-import numpy as np
-import pandas as pd
 import polars as pl
+import polars_st as st
 import shapely.geometry as sg
 import shapely.ops as so
 
@@ -75,7 +73,7 @@ def get_trips(
     *,
     as_geo: bool = False,
     use_utm: bool = False,
-) -> pl.LazyFrame:
+) -> pl.LazyFrame | st.GeoLazyFrame:
     """
     Return ``feed.trips``.
     If date (YYYYMMDD date string) is given then subset the result to trips
@@ -84,7 +82,7 @@ def get_trips(
     then further subset the result to trips in service at that time.
 
     If ``as_geo`` and ``feed.shapes`` is not None, then return the trips as a
-    GeoDataFrame of LineStrings representating trip shapes.
+    geotable of LineStrings representating trip shapes.
     Use local UTM CRS if ``use_utm``; otherwise it the WGS84 CRS.
     If ``as_geo`` and ``feed.shapes`` is ``None``, then raise a ValueError.
     """
@@ -129,7 +127,7 @@ def get_trips(
     return f
 
 
-def compute_trip_activity(feed: "Feed", dates: list[str]) -> pd.LazyFrame:
+def compute_trip_activity(feed: "Feed", dates: list[str]) -> pl.LazyFrame:
     """
     Mark trips as active or inactive on the given dates (YYYYMMDD date strings).
     Return a table with the columns
@@ -435,7 +433,7 @@ def locate_trips(feed, date: str, times: list[str]) -> pl.LazyFrame:
     given date (YYYYMMDD date string) and times (HH:MM:SS time strings,
     possibly with HH > 23).
 
-    Return a DataFrame with the columns
+    Return a table with the columns
 
     - ``'trip_id'``
     - ``'shape_id'``
