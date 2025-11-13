@@ -24,7 +24,7 @@ Install it from PyPI with UV, say, via ``uv add gtfs_kit_polars``.
 
 Examples
 ========
-In `this Jupyter notebook <https://github.com/mrcagney/gtfs_kit_polars/notebooks/examples.ipynb>`_.
+In `a Jupyter notebook of examples <https://github.com/mrcagney/gtfs_kit_polars/blob/master/notebooks/examples.ipynb>`_ in the `project's Github repository <https://github.com/mrcagney/gtfs_kit_polars>`_.
 
 
 Conventions
