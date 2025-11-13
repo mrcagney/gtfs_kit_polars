@@ -12,13 +12,12 @@ def _(Path):
     import polars as pl 
     import polars_st as st
     import marimo as mo
-    import matplotlib
     import folium as fl
 
     import gtfs_kit_polars as gk
 
 
-    HERE = pb.Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+    HERE = pb.Path(__file__).resolve().parent if "__file__" in globals() else pb.Path.cwd()
     PROJECT_ROOT = HERE.parent  # notebooks/ -> project/
     DATA = (PROJECT_ROOT / "data").resolve()
     return DATA, fl, gk, json, mo, pl, st
