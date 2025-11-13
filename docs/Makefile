@@ -6,6 +6,7 @@ SPHINXOPTS    =
 SPHINXBUILD   = sphinx-build
 PAPER         =
 BUILDDIR      = _build
+DOCS_REMOTE   = git@github.com:mrcagney/gtfs_kit_polars_docs
 
 # User-friendly check for sphinx-build
 ifeq ($(shell which $(SPHINXBUILD) >/dev/null 2>&1; echo $$?), 1)
@@ -61,8 +62,19 @@ dirhtml:
 
 singlehtml:
 	$(SPHINXBUILD) -b singlehtml $(ALLSPHINXOPTS) $(BUILDDIR)/singlehtml
+	@out="$(BUILDDIR)/singlehtml/index.html"; \
+	if command -v gsed >/dev/null 2>&1; then SED=gsed; else SED=sed; fi; \
+	$$SED -i.bak -E 's/#document-[^"#]+#/#/g' "$$out" && rm -f "$$out.bak"
 	@echo
 	@echo "Build finished. The HTML page is in $(BUILDDIR)/singlehtml."
+
+
+publish-docs-github: singlehtml
+	@echo "Publishing from '$(BUILDDIR)/singlehtml' to '$(DOCS_REMOTE)' ..."
+	ghp-import --no-jekyll --branch=docs-build "$(BUILDDIR)/singlehtml"
+	git push "$(DOCS_REMOTE)" docs-build:master --force
+	-@git branch -D docs-build >/dev/null 2>&1 || true
+	@echo "Docs published."
 
 pickle:
 	$(SPHINXBUILD) -b pickle $(ALLSPHINXOPTS) $(BUILDDIR)/pickle

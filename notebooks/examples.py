@@ -199,10 +199,5 @@ def _(dates, feed_1, pl, screen_line, trip_id):
     return
 
 
-@app.cell
-def _():
-    return
-
-
 if __name__ == "__main__":
     app.run()
